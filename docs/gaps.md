@@ -73,7 +73,7 @@ The same gaps grouped the way the parity documents are, for agents working in on
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-10-13 | trivial | Ask Agent quick actions, including Action items, Apply heading styles, Tidy formatting and Check consistency; agent edits tracked under its name, separate Undo steps |
+| 2026-10-13 | trivial | Ask Agent quick actions, including Final polish and three Reading level presets, Action items, Apply heading styles, Tidy formatting and Check consistency; agent edits tracked under its name, separate Undo steps |
 | 2026-10-13 | trivial | Ask Agent landed (gap 25): the window sends a selection and an instruction to the agent the person connected over the control channel or MCP, and shows its answer; no provider in WordCraft |
 | 2026-10-11 | trivial | Table column and row markers on the rulers landed (#700): the ruler's column markers are off the UI/UX gaps |
 | 2026-10-11 | trivial | UI/UX gaps: the table context menu landed, its items following the selection as in Word (Delete Cells, Rows, Columns or Table, Merge and Split Cells, Distribute, AutoFit, Text Direction, Insert Caption…, Table Properties…); objects' menus and Border Styles remain |

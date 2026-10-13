@@ -57,7 +57,7 @@ impl AgentAction {
 }
 
 /// The submenus, in order, after the top-level actions that come before them.
-pub const MENUS: [&str; 3] = ["Rewrite", "Translate", "More"];
+pub const MENUS: [&str; 4] = ["Rewrite", "Translate", "Reading level", "More"];
 
 /// Tones for Rewrite: (id, label, how).
 const TONES: [(&str, &str, &str); 4] = [
@@ -123,6 +123,12 @@ pub fn defaults() -> Vec<AgentAction> {
         a("tidyFormatting".into(), "Tidy formatting", Some("More"), "Make the selection's formatting consistent: replace direct fonts, sizes and spacing with the document's styles. Don't change any wording.".into(), Apply::Auto),
         a("checkConsistency".into(), "Check consistency", Some("More"), "Point out inconsistent names, numbers, dates, terms and cross-references in the selected text. Change nothing; answer in your reply only.".into(), Apply::ReplyOnly),
     ]);
+    v.extend([
+        a("finalPolish".into(), "Final polish", Some("More"), "Polish the selected text for grammar, clarity and consistency. Preserve its facts, names, numbers, meaning, structure and language. Add no information.".into(), Apply::Replace),
+        a("reading.general".into(), "General public", Some("Reading level"), "Rewrite the selected text for an adult non-specialist. Explain jargon without changing facts or talking down to the reader. Preserve its meaning and language.".into(), Apply::Replace),
+        a("reading.secondary".into(), "Secondary school", Some("Reading level"), "Adapt the selected text's vocabulary and sentences for a secondary-school reader. Preserve its information, useful nuances, meaning and language.".into(), Apply::Replace),
+        a("reading.expert".into(), "Expert", Some("Reading level"), "Adapt the selected text for an expert reader. Preserve technical precision, facts, meaning and language. Invent no data.".into(), Apply::Replace),
+    ]);
     v.extend(LANGUAGES.iter().map(|(tag, label, name)| {
         a(
             format!("translate.{tag}"),
@@ -184,7 +190,7 @@ mod tests {
     #[test]
     fn the_built_in_actions_are_complete_and_unique() {
         let all = defaults();
-        assert_eq!(all.len(), 25, "built-in action count");
+        assert_eq!(all.len(), 29, "built-in action count");
         let mut ids: Vec<&str> = all.iter().map(|a| a.id.as_str()).collect();
         ids.sort_unstable();
         ids.dedup();
@@ -208,6 +214,10 @@ mod tests {
             "headings",
             "tidyFormatting",
             "checkConsistency",
+            "finalPolish",
+            "reading.general",
+            "reading.secondary",
+            "reading.expert",
         ] {
             assert!(find(id).is_some(), "{id}");
         }
@@ -225,6 +235,17 @@ mod tests {
             let action = find(id).unwrap();
             assert_eq!(action.menu.as_deref(), Some("More"));
             assert_eq!(action.apply, apply);
+        }
+        let polish = find("finalPolish").unwrap();
+        assert_eq!(polish.menu.as_deref(), Some("More"));
+        assert_eq!(polish.apply, Apply::Replace);
+        for word in ["facts", "names", "numbers", "meaning", "structure", "Add no information"] {
+            assert!(polish.instruction.contains(word));
+        }
+        for id in ["reading.general", "reading.secondary", "reading.expert"] {
+            let action = find(id).unwrap();
+            assert_eq!(action.menu.as_deref(), Some("Reading level"));
+            assert_eq!(action.apply, Apply::Replace);
         }
         assert!(find("nope").is_none());
     }

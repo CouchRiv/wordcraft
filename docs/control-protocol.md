@@ -169,3 +169,5 @@ WordCraft calls no model and holds no key: the agent is whatever the person conn
 
 `wordcraft-cli mcp --connect` turns these into the tools `wait_for_request` and
 `reply_to_request` ([MCP server](mcp.md#ask-agent)).
+
+Quick actions also include **Final polish** under More (grammar, clarity and consistency, preserving facts, names, numbers, meaning and structure without additions), and **Reading level** with General public, Secondary school and Expert. All four use `apply: "replace"`.

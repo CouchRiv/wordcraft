@@ -46,7 +46,7 @@ own (`AGENTS.md`: no Microsoft iconography, ever).
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-10-13 | trivial | Ask Agent quick actions in the bubble (Rewrite with four tones, Shorten, Expand, Fix spelling & grammar, Simplify, Translate, More); the agent's edits arrive as tracked changes under its name |
+| 2026-10-13 | trivial | Ask Agent quick actions in the bubble (Rewrite with four tones, Shorten, Expand, Fix spelling & grammar, Simplify, Translate, Reading level (General public, Secondary school, Expert), More (including Final polish)); the agent's edits arrive as tracked changes under its name |
 | 2026-10-13 | trivial | Ask Agent: a chip beside the mini toolbar while an agent is present, Help › Agents › Ask Agent, Ask Agent… in the page's context menu, Ctrl+Shift+O (⌘⇧O); a bubble under the selection takes the instruction (recent ones one click away), shows a waiting indicator, Cancel and the agent's answer |
 | 2026-10-11 | trivial | Tables on the page: Ctrl shares a column border's change among the columns right of it, the left edge moves a left-aligned table's indent (a centred or right-aligned one keeps its alignment), a border of cells selected across moves only in their rows, Alt shows the column widths on the ruler (#711); 80% → 90% |
 | 2026-10-11 | trivial | Rulers: table column and row markers drag their borders (one undo step; from the ruler only the column left of a border changes, with Shift the neighbour makes up the difference), and in a cell the indents and tabs are measured from it (#700) |
