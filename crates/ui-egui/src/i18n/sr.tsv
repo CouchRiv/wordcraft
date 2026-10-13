@@ -2089,3 +2089,5 @@
 	Start-up	Покретање
 	Show the Start screen when WordCraft starts	Прикажи почетни екран при покретању програма WordCraft
 	On: WordCraft opens on File › Home, with a blank document, the templates and your recent documents. Off: it opens a blank document.	Укључено: WordCraft се отвара на Фајл › Почетак, са празним документом, шаблонима и недавним документима. Искључено: отвара празан документ.
+# Review › Show Markup › Specific People (review.reviewers)
+	Specific People	Одређене особе

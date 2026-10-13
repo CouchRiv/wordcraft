@@ -452,6 +452,35 @@ pub(crate) fn language_menu(ui: &mut Ui, app: &mut WordApp) {
     mi_check(ui, app, "Do Not Check Spelling or Grammar", no_proof, "review.language", json!({"noProof": !no_proof}));
 }
 
+/// Review › Show Markup › Specific People: every reviewer (people and agents, `review.reviewers`)
+/// with a check mark while their marks show and a dot in their colour; All Reviewers shows everyone.
+pub(crate) fn reviewers_menu(ui: &mut Ui, app: &mut WordApp) {
+    let list =
+        app.session.run("review.reviewers", &json!({})).ok().and_then(|v| v.get("reviewers").and_then(Value::as_array).cloned()).unwrap_or_default();
+    ui.menu_button(tl!("Specific People"), |ui| {
+        let all = app.session.view.hidden_reviewers.is_empty();
+        mi_check(ui, app, "All Reviewers", all, "review.reviewers", json!({"all": true}));
+        ui.separator();
+        for r in list.iter().take(50) {
+            let Some(author) = r.get("author").and_then(Value::as_str) else { continue };
+            let shown = r.get("shown").and_then(Value::as_bool).unwrap_or(true);
+            let color = r
+                .get("color")
+                .and_then(Value::as_str)
+                .and_then(|h| u32::from_str_radix(h, 16).ok())
+                .map_or(egui::Color32::GRAY, |c| egui::Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8));
+            let mark = egui::RichText::new("✓");
+            let mark = if shown { mark } else { mark.color(egui::Color32::TRANSPARENT) };
+            let name = if author.is_empty() { tl!("Author").to_string() } else { author.to_string() };
+            let item = egui::Button::new((mark, egui::RichText::new("●").color(color), name)).selected(shown).min_size(vec2(200.0, 0.0));
+            if ui.add(item).clicked() {
+                crate::widgets::run_from_ribbon(app, "review.reviewers", json!({"author": author, "show": !shown}));
+                ui.close();
+            }
+        }
+    });
+}
+
 /// A menu item with a check mark when `checked` (the current choice of several).
 fn mi_check(ui: &mut Ui, app: &mut WordApp, label: &str, checked: bool, id: &str, params: Value) {
     // An invisible mark keeps the unchecked labels aligned with the checked one.
@@ -1533,6 +1562,7 @@ fn review(app: &mut WordApp, ui: &mut Ui) {
                     mi(ui, app, "No Markup", "review.markup", json!({"value": "noMarkup"}));
                 },
             );
+            menu_button(ui, app, "markup", Some("Show Markup"), "Show Markup", false, "review.reviewers", reviewers_menu);
             small(ui, app, "reviewingPane", Some("Reviewing Pane"), "Reviewing Pane", "review.changes", json!({}), false);
         });
     });
@@ -1540,10 +1570,17 @@ fn review(app: &mut WordApp, ui: &mut Ui) {
         menu_button(ui, app, "accept", Some("Accept"), "Accept", true, "review.accept", |ui, app| {
             mi(ui, app, "Accept This Change", "review.accept", json!({}));
             mi(ui, app, "Accept All Changes", "review.acceptAll", json!({}));
+            // Only while someone's marks are hidden (Show Markup › Specific People), as in Word.
+            if !app.session.view.hidden_reviewers.is_empty() {
+                mi(ui, app, "Accept All Changes Shown", "review.acceptAll", json!({"shown": true}));
+            }
         });
         menu_button(ui, app, "reject", Some("Reject"), "Reject", true, "review.reject", |ui, app| {
             mi(ui, app, "Reject Change", "review.reject", json!({}));
             mi(ui, app, "Reject All Changes", "review.rejectAll", json!({}));
+            if !app.session.view.hidden_reviewers.is_empty() {
+                mi(ui, app, "Reject All Changes Shown", "review.rejectAll", json!({"shown": true}));
+            }
         });
         stack(ui, |ui| {
             small(ui, app, "prevChange", Some("Previous"), "Previous Change", "review.previousChange", json!({}), false);

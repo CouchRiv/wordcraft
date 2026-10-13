@@ -197,6 +197,10 @@ pub struct DisplayOptions {
     pub hide_ink: bool,
     /// How tracked changes and comments are marked when `markup` is on (Track Changes Options).
     pub revisions: MarkupOptions,
+    /// Show Markup › Specific People: authors whose tracked changes show no marks (their
+    /// insertions read as plain text; the layout leaves their deletions out,
+    /// [`crate::LayoutOptions::hidden_reviewers`]).
+    pub hidden_reviewers: Vec<String>,
 }
 
 impl Default for DisplayOptions {
@@ -210,6 +214,7 @@ impl Default for DisplayOptions {
             placeholders: false,
             hide_ink: false,
             revisions: MarkupOptions::default(),
+            hidden_reviewers: Vec::new(),
         }
     }
 }
@@ -346,6 +351,52 @@ pub fn revision_color(i: u32) -> Rgb {
     const C: [Rgb; 6] =
         [Rgb(0xB0, 0x1E, 0x8F), Rgb(0x1E, 0x6E, 0xB0), Rgb(0x2E, 0x8B, 0x3E), Rgb(0xC0, 0x5A, 0x10), Rgb(0x70, 0x3C, 0xB0), Rgb(0x0E, 0x7C, 0x86)];
     C.get(i as usize % C.len()).copied().unwrap_or(C[0])
+}
+
+/// An agent's colour, from its name alone ([`wordcraft_doc::agents::name_hash`]): the same in every
+/// document and session, on the page (its tracked changes), in the balloons and in the window's
+/// list of Ask Agent requests.
+pub fn agent_color(name: &str) -> Rgb {
+    const C: [Rgb; 8] = [
+        Rgb(0xC2, 0x18, 0x5B),
+        Rgb(0x15, 0x65, 0xC0),
+        Rgb(0x2E, 0x7D, 0x32),
+        Rgb(0xD8, 0x43, 0x15),
+        Rgb(0x6A, 0x1B, 0x9A),
+        Rgb(0x00, 0x83, 0x8F),
+        Rgb(0x9E, 0x77, 0x00),
+        Rgb(0x45, 0x5A, 0x64),
+    ];
+    let i = wordcraft_doc::agents::name_hash(name) as usize % C.len();
+    C.get(i).copied().unwrap_or(C[0])
+}
+
+/// The colour of `author`'s markup: an agent's own colour ([`agent_color`], for authors written
+/// `Agent (<name>)`), else the colour of the author's place among the document's authors (`index`,
+/// [`revision_color`]), as Word colours reviewers by author.
+pub fn author_color(index: u32, author: &str) -> Rgb {
+    match wordcraft_doc::agents::name_of(author) {
+        Some(name) => agent_color(name),
+        None => revision_color(index),
+    }
+}
+
+/// Whether revision `r` is by a reviewer whose markup is hidden ([`DisplayOptions::hidden_reviewers`]).
+fn hidden_reviewer(doc: &Document, opts: &DisplayOptions, r: u32) -> bool {
+    !opts.hidden_reviewers.is_empty() && doc.revisions.get(r as usize).is_some_and(|v| opts.hidden_reviewers.contains(&v.author))
+}
+
+/// A paragraph mark's insertion and deletion, less those of hidden reviewers.
+fn shown_marks(doc: &Document, opts: &DisplayOptions, ins: Option<u32>, del: Option<u32>) -> (Option<u32>, Option<u32>) {
+    (ins.filter(|r| !hidden_reviewer(doc, opts, *r)), del.filter(|r| !hidden_reviewer(doc, opts, *r)))
+}
+
+/// The colour of revision `r`'s author ([`author_color`]).
+fn revision_author_color(doc: &Document, r: u32) -> Rgb {
+    match doc.revisions.get(r as usize) {
+        Some(v) => author_color(author_index(doc, &v.author), &v.author),
+        None => revision_color(0),
+    }
 }
 
 fn stroke_of(u: Underline) -> Stroke {
@@ -777,9 +828,9 @@ fn lines(
                 continue;
             }
             let shown = opts.markup && m.insertions_deletions;
-            let del = rc.del.filter(|_| shown);
-            let ins = rc.ins.filter(|_| shown && del.is_none());
-            let author = |r: u32| revision_color(doc.revisions.get(r as usize).map(|v| author_index(doc, &v.author)).unwrap_or(0));
+            let del = rc.del.filter(|r| shown && !hidden_reviewer(doc, opts, *r));
+            let ins = rc.ins.filter(|r| shown && del.is_none() && !hidden_reviewer(doc, opts, *r));
+            let author = |r: u32| revision_author_color(doc, r);
             // Moved text: green, double strikethrough where it was, double underline where it went.
             let moved_to = doc.move_name(ins).is_some();
             let moved_from = del.is_some() && doc.move_name(del).is_some();
@@ -1064,18 +1115,13 @@ fn lines(
                 let mx = if line.rtl { ex - 1.0 - size * 0.6 } else { ex + 1.0 };
                 // A tracked (inserted or deleted) paragraph mark is drawn in its author's colour.
                 let m = &opts.revisions;
-                let color = para.filter(|_| opts.markup && m.insertions_deletions).and_then(|p| match (p.mark.ins, p.mark.del) {
-                    (ins, del) if doc.move_name(del).is_some() || (del.is_none() && doc.move_name(ins).is_some()) => Some(MOVE_COLOR),
-                    (_, Some(r)) => Some(
-                        m.delete_color
-                            .unwrap_or_else(|| revision_color(doc.revisions.get(r as usize).map(|v| author_index(doc, &v.author)).unwrap_or(0))),
-                    ),
-                    (Some(r), None) => Some(
-                        m.insert_color
-                            .unwrap_or_else(|| revision_color(doc.revisions.get(r as usize).map(|v| author_index(doc, &v.author)).unwrap_or(0))),
-                    ),
-                    _ => None,
-                });
+                let color =
+                    para.filter(|_| opts.markup && m.insertions_deletions).and_then(|p| match shown_marks(doc, opts, p.mark.ins, p.mark.del) {
+                        (ins, del) if doc.move_name(del).is_some() || (del.is_none() && doc.move_name(ins).is_some()) => Some(MOVE_COLOR),
+                        (_, Some(r)) => Some(m.delete_color.unwrap_or_else(|| revision_author_color(doc, r))),
+                        (Some(r), None) => Some(m.insert_color.unwrap_or_else(|| revision_author_color(doc, r))),
+                        _ => None,
+                    });
                 // The last paragraph of a section ends in a section break instead of a plain ¶.
                 if let Some(start) = section_break_after(doc, story, path) {
                     let (x0, x1) = if line.rtl { (x + line.left, ex - 2.0) } else { (ex + 2.0, x + line.right) };

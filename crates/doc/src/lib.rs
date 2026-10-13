@@ -10,6 +10,7 @@
 //! compare in document order.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod agents;
 pub mod bidi;
 pub mod chart;
 mod cjk_numbers;

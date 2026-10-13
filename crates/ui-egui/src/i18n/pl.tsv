@@ -2530,3 +2530,19 @@ preview	Title	Tytuł
 	Summarize	Streść
 	Continue writing	Pisz dalej
 	Explain	Wyjaśnij
+# Ask Agent: several agents, Show Markup › Specific People
+	Agent	Agent
+	{agent} · holds this text	{agent} · rezerwuje ten tekst
+	Waiting	Oczekuje
+	Working	W toku
+	Answered	Odpowiedziano
+	{count} requests open	Otwarte prośby: {count}
+	Not taken yet	Jeszcze nieprzyjęta
+	Other agents can't change this text until it is done.	Inni agenci nie mogą zmieniać tego tekstu, dopóki prośba nie zostanie ukończona.
+	Release	Zwolnij
+	Let other agents change this text while the request runs	Pozwól innym agentom zmieniać ten tekst w trakcie prośby
+	Go to text	Przejdź do tekstu
+	Specific People	Określone osoby
+	All Reviewers	Wszyscy recenzenci
+	Accept All Changes Shown	Zaakceptuj wszystkie wyświetlane zmiany
+	Reject All Changes Shown	Odrzuć wszystkie wyświetlane zmiany

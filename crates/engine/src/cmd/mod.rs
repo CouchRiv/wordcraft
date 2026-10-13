@@ -35,6 +35,7 @@ pub mod phonetic;
 pub mod protect;
 pub mod references;
 pub mod review;
+pub mod reviewers;
 pub mod smart_art;
 pub mod speech;
 pub mod table;
@@ -79,6 +80,7 @@ pub fn registry() -> Registry {
     v.extend(table_resize::specs());
     v.extend(table_mouse::specs());
     v.extend(review::specs());
+    v.extend(reviewers::specs());
     v.extend(file::specs());
     v.extend(options::specs());
     v.extend(design::specs());

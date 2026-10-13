@@ -1,8 +1,10 @@
 //! Programmatic control of the running app (agents, tests, MCP bridge).
 //!
 //! Methods (JSON lines over the host's transport, see `docs/control-protocol.md`):
-//! - `engine.execute {command, params, request?}`: run any command (engine or `ui.*`); with `request`
-//!   (an Ask Agent request id) as that request's agent, its edits tracked under the agent's name
+//! - `engine.execute {command, params, request?, agent?}`: run any command (engine or `ui.*`); with
+//!   `request` (an Ask Agent request id) as that request's agent, its edits tracked under the agent's
+//!   name; with `agent` (a name) as that agent outside any request. Either way, text another agent
+//!   is working on is refused (`agent_queue`)
 //! - `engine.commands {search?}`: engine and app print commands with enablement and parameters
 //! - `document.inspect`: document structure; `ui.inspect`: UI state, canvas geometry, perf
 //! - `ui.click {x, y, button?, count?, shift?, cmd?}`, `ui.move {x, y}`, `ui.drag {x, y, toX, toY}`:
@@ -63,7 +65,7 @@ pub fn inspect(app: &mut WordApp, ctx: &egui::Context) -> Value {
         "focused": app.canvas.focused,
         "title": app.title_stem(),
         "dirty": app.session.dirty,
-        "askAgent": app.ask_agent.inspect(),
+        "askAgent": crate::agent_queue::inspect(app),
         "perf": {"frameMs": app.frame_ms, "renderMs": app.canvas.render_ms, "layoutMs": app.session.layout().ms},
     })
 }
@@ -117,9 +119,10 @@ pub fn handle(app: &mut WordApp, ctx: &egui::Context, req: &ControlRequest) -> O
             let Some(id) = s("command").or(s("id")) else { return err("missing `command`") };
             let params = p.get("params").cloned().filter(|v| !v.is_null()).unwrap_or(json!({}));
             // `request`: run for that Ask Agent request, as the agent's tracked change.
-            let r = match p.get("request") {
-                None | Some(Value::Null) => app.execute(id, params),
-                Some(r) => match r.as_u64() {
+            let r = match (p.get("request"), s("agent")) {
+                (None | Some(Value::Null), None) => app.execute(id, params),
+                (None | Some(Value::Null), Some(agent)) => crate::agent_queue::run_as(app, agent, |app| app.execute(id, params)),
+                (Some(r), _) => match r.as_u64() {
                     Some(request) => crate::ask_agent::run_for(app, request, id, |app| app.execute(id, params)),
                     None => Err("`request` is an Ask Agent request id".into()),
                 },

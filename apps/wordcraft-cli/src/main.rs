@@ -27,11 +27,14 @@ USAGE:
                                               who tracked changes and comments are by)
   wordcraft-cli commands [--json]             list every command
   wordcraft-cli parity [--markdown]           feature-catalog parity
-  wordcraft-cli mcp [--connect HOST:PORT [--channel] | --author NAME] [--automation-read-root DIR] [--automation-write-root DIR]
+  wordcraft-cli mcp [--connect HOST:PORT [--channel] [--agent NAME] | --author NAME] [--automation-read-root DIR] [--automation-write-root DIR]
                                               MCP server on stdio (headless, or bridged to the app).
                                               --channel (with --connect): also push Ask Agent requests
                                               as experimental claude/channel events, for clients that
                                               show them; wait_for_request works without it.
+                                              --agent (with --connect): the name this agent goes by in
+                                              the app, on its tracked changes and comments (default:
+                                              the MCP client's name); give each agent its own.
                                               --automation-read-root / --automation-write-root confine
                                               the files the agent's commands read (open, insert text
                                               or picture, mail-merge data, templates…) and write (save,
@@ -126,6 +129,7 @@ const MCP_OPTIONS: &[OptionSpec] = &[
     OptionSpec { name: "--connect", takes_value: true },
     OptionSpec { name: "--author", takes_value: true },
     OptionSpec { name: "--channel", takes_value: false },
+    OptionSpec { name: "--agent", takes_value: true },
 ];
 const ZOTERO_OPTIONS: &[OptionSpec] = &[
     OptionSpec { name: "--cmd", takes_value: true },
@@ -308,6 +312,13 @@ fn run(args: &[String]) -> Result<(), Failure> {
             if channel && connect.is_none() {
                 return Err("mcp: --channel pushes the app's Ask Agent requests, so it needs --connect HOST:PORT".into());
             }
+            let agent_name = arg_value(&rest, "--agent");
+            if agent_name.is_some() && connect.is_none() {
+                return Err("mcp: --agent names the agent in the running app (Ask Agent), so it needs --connect HOST:PORT; the headless server takes --author".into());
+            }
+            if agent_name.as_deref().is_some_and(|n| n.trim().is_empty()) {
+                return Err("mcp: --agent needs a name".into());
+            }
             if roots.is_some() && connect.is_some() {
                 return Err(
                     "mcp: --automation-read-root and --automation-write-root confine the headless server; a running app is not confined by them"
@@ -322,7 +333,10 @@ fn run(args: &[String]) -> Result<(), Failure> {
                     return Err("mcp: --author applies to the headless server; with --connect, run file.setAuthor".into());
                 }
                 Some(addr) => {
-                    let remote = wordcraft_mcp::Remote::connect(&addr).map_err(|e| format!("can't reach the WordCraft app at {addr}: {e}"))?;
+                    let mut remote = wordcraft_mcp::Remote::connect(&addr).map_err(|e| format!("can't reach the WordCraft app at {addr}: {e}"))?;
+                    if let Some(name) = &agent_name {
+                        remote = remote.with_agent_name(name);
+                    }
                     if let Some(w) = remote.key_warning() {
                         eprintln!("wordcraft-cli: {w}");
                     }
@@ -495,6 +509,14 @@ mod tests {
         assert!(run(&args(&["run", "--author", "Claude", "--cmd", "review.trackChanges={\"value\":true}"])).is_ok());
         // The app's user name is the person's own; a bridge flag must not rewrite it.
         assert!(run(&args(&["mcp", "--connect", "127.0.0.1:9", "--author", "Claude"])).is_err_and(|e| e.to_string().contains("--author")));
+    }
+
+    /// `--agent` names an agent in the running app; it means nothing to the headless server.
+    #[test]
+    fn agent_flag_needs_the_app() {
+        assert!(validate_options("mcp", &args(&["--connect", "127.0.0.1:9", "--agent", "copy editor"]), MCP_OPTIONS).is_ok());
+        assert!(run(&args(&["mcp", "--agent", "copy editor"])).is_err_and(|e| e.to_string().contains("--connect")));
+        assert!(run(&args(&["mcp", "--connect", "127.0.0.1:9", "--agent", "  "])).is_err_and(|e| e.to_string().contains("needs a name")));
     }
 
     #[test]

@@ -378,6 +378,9 @@ pub struct ParaEnv<'a> {
     pub field_codes: bool,
     /// Leave tracked deletions out, like hidden text (the final, "No Markup" text).
     pub hide_deleted: bool,
+    /// Revisions whose deletions are left out all the same: hidden reviewers' (sorted,
+    /// [`crate::hidden_revisions`]).
+    pub hidden_revisions: &'a [u32],
     /// The table style's formatting for text in this paragraph's cell (`None` outside tables).
     pub table: Option<&'a CellText>,
     /// Check spelling (and grammar, as the options say) for squiggles; `None` = no squiggles.
@@ -1127,8 +1130,9 @@ impl Builder<'_> {
 
 /// Whether text with this formatting is left out of the layout: hidden text unless it is shown, and
 /// tracked deletions in the final text. It takes no room, draws nothing and is no place to break.
-pub(crate) fn left_out(rc: &ResolvedChar, show_hidden: bool, hide_deleted: bool) -> bool {
-    (rc.hidden && !show_hidden) || (rc.del.is_some() && hide_deleted)
+/// A hidden reviewer's deletion (`hidden`, sorted) is left out too.
+pub(crate) fn left_out(rc: &ResolvedChar, show_hidden: bool, hide_deleted: bool, hidden: &[u32]) -> bool {
+    (rc.hidden && !show_hidden) || rc.del.is_some_and(|d| hide_deleted || hidden.binary_search(&d).is_ok())
 }
 
 /// Lay out one paragraph.
@@ -1197,7 +1201,7 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
         let rc = resolve(props);
         runs.push(ProofRun::of(range.clone(), &rc));
         let Some(text) = p.text.get(range.clone()) else { continue };
-        if left_out(&rc, b.env.show_hidden, b.env.hide_deleted) {
+        if left_out(&rc, b.env.show_hidden, b.env.hide_deleted, b.env.hidden_revisions) {
             match left.last_mut() {
                 Some(last) if last.end == range.start => last.end = range.end,
                 _ => left.push(range.clone()),
@@ -1206,7 +1210,7 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
             let g = b.glyphs.len() as u32;
             // Word still prints the note of a hidden reference mark (and numbers it); a deleted
             // reference is gone from the final text, note and all.
-            let keeps_notes = !(rc.del.is_some() && b.env.hide_deleted);
+            let keeps_notes = !rc.del.is_some_and(|d| b.env.hide_deleted || b.env.hidden_revisions.binary_search(&d).is_ok());
             for (i, c) in text.char_indices() {
                 let mut note = None;
                 if c == OBJ {

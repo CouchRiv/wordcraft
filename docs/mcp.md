@@ -82,7 +82,7 @@ files it was given rather than guarding against other software on the computer.
 
 | Tool | What it does |
 |---|---|
-| `list_commands` | every command (filter with `query`) — over 270 of them |
+| `list_commands` | every command (filter with `query`) ; over 270 of them |
 | `execute` | run one command: `{command: "insert.table", params: {rows: 3, cols: 4}}` |
 | `batch` | run several commands in order |
 | `new_document` | blank, sample, letter, resume, report |
@@ -105,8 +105,8 @@ Ctrl+Shift+O) and type an instruction. Two tools carry it, for any MCP client:
 
 | Tool | What it does |
 |---|---|
-| `wait_for_request` | waits up to `timeout_s` (default 30, at most 60) for the next request: `{id, instruction, action, apply, selection: {text, anchor, focus, truncated}, document: {title, saved, language}, review}`, or `{none: true}` |
-| `reply_to_request` | `{id, text, done?}`: shows `text` in the bubble under the selection; `done: false` is a progress note that keeps the request open; a request the person cancelled answers `{cancelled: true}` |
+| `wait_for_request` | waits up to `timeout_s` (default 30, at most 60) for the next request: `{id, instruction, action, apply, selection: {text, anchor, focus, truncated}, document: {title, saved, language}, review}`, or `{none: true}`; `agent` sets the name the agent goes by |
+| `reply_to_request` | `{id, text, done?, comment?}`: shows `text` in the bubble under the selection; `done: false` is a progress note that keeps the request open; `comment` (with the answer) is anchored as a comment on the text the agent changed; a request the person cancelled answers `{cancelled: true}` |
 
 The agent's loop: `wait_for_request`; at once `reply_to_request {id, text: "Rewriting…", done:
 false}`, so the person sees the agent has it; the work with `execute`, `select_text`,
@@ -123,6 +123,34 @@ plain words, and `apply`, where the result goes (`replace` the selection, `inser
 the bridge marks the agent's `execute` calls with it, so what the agent changes arrives as tracked
 changes by `Agent (<MCP client name>)` for the person to accept or reject on the Review tab, even
 with Track Changes off; the person's own setting is left alone.
+
+### Several agents
+
+Several agents can serve one window, each through its own `wordcraft-cli mcp --connect`. Each goes
+by a name: the MCP client's (`clientInfo.name`), or one given with `--agent NAME` (or
+`wait_for_request {agent}`), which matters when two agents run the same client. Its tracked
+changes and comments are signed `Agent (<name>)` and keep one colour, from the name, everywhere.
+The text of a request an agent took is held for it until it answers: another agent's `execute`
+that changes text inside it fails with an error naming the holder, and the document is left as it
+was; the person can release it from the window. With no request open, the bridge marks the agent's
+calls with its name so this applies to them too. With its answer, an agent can say what it did in
+`comment`: the window anchors it as a comment on the text it changed. The person sees every open
+request in the window's list (agent, instruction, state), can show or hide each agent's marks
+(Review › Show Markup › Specific People) and accept or reject one agent's changes
+(`review.acceptAll {author}`, using the same `review.accept/reject {revisions}` resolver as
+proposal review). A document comment is added only after a successful edit for the request;
+otherwise its text remains in the request reply. Edits outside the request range are refused.
+
+Closing comments for table selections are explicitly refused: whole-table locks protect
+other agents, but cell-level anchor tracking is still design work. The answer stays visible
+in the request list. Story-block locks do not cover indirect changes through document-wide
+styles or metadata; a policy for these commands remains design work.
+
+The proposal workflow from stage (c) is integrated separately: a request carrying a `proposal`
+must refuse every agent document modification. Its closing comment must be stored with the
+proposal, then anchored by the app at Accept only after applying an effective change. Discard
+adds no comment. The connection to that revision group and its review state is design for the
+stack integration, not shipped on this quick-actions-based branch.
 
 ### Pushed requests (`--channel`)
 

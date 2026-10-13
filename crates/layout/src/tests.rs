@@ -149,6 +149,46 @@ fn deletions_leave_the_final_text_layout() {
     }
 }
 
+/// Show Markup › Specific People: a hidden reviewer's deletion takes no room and its insertion
+/// reads as plain text; another reviewer's marks still show. Agents' marks have their own colour.
+#[test]
+fn hidden_reviewers_marks_leave_the_page() {
+    // "Keep " + "GONE " deleted by beta (5..10) + "NEW" inserted by alpha (10..13).
+    let mut d = Document::from_text("Keep GONE NEW");
+    for author in ["Agent (beta)", "Agent (alpha)"] {
+        d.revisions.push(wordcraft_doc::Revision {
+            kind: wordcraft_doc::RevisionKind::Insert,
+            author: author.into(),
+            date: String::new(),
+            move_name: None,
+        });
+    }
+    d.format_range(&Pos::body(0, 5), &Pos::body(0, 10), &|c| c.del = Some(0)).unwrap();
+    d.format_range(&Pos::body(0, 10), &Pos::body(0, 13), &|c| c.ins = Some(1)).unwrap();
+    let draw = |hidden: &[&str]| {
+        let hidden: Vec<String> = hidden.iter().map(|h| h.to_string()).collect();
+        let l = layout(&d, &mut LayoutCache::new(), &LayoutOptions { hidden_reviewers: hidden.clone(), ..Default::default() });
+        let items = display::page_display(&d, &l.pages[0], &display::DisplayOptions { hidden_reviewers: hidden, ..Default::default() });
+        let text: String = items.iter().filter_map(|i| if let display::Draw::Glyphs { text, .. } = i { Some(text.as_str()) } else { None }).collect();
+        let colors: Vec<_> = items.iter().filter_map(|i| if let display::Draw::Glyphs { color, .. } = i { Some(*color) } else { None }).collect();
+        (text, colors, l.caret(&Pos::body(0, 10)).map(|c| c.x))
+    };
+    let (all, colors, x_all) = draw(&[]);
+    assert_eq!(all, "Keep GONE NEW");
+    assert!(colors.contains(&display::agent_color("alpha")) && colors.contains(&display::agent_color("beta")), "{colors:?}");
+    let (text, colors, x_hidden) = draw(&["Agent (beta)"]);
+    assert_eq!(text, "Keep NEW", "beta's deletion is left out");
+    assert!(x_hidden < x_all, "and takes no room");
+    assert!(colors.contains(&display::agent_color("alpha")) && !colors.contains(&display::agent_color("beta")));
+    let (text, colors, _) = draw(&["Agent (alpha)"]);
+    assert_eq!(text, "Keep GONE NEW", "alpha's insertion stays, as plain text");
+    assert!(!colors.contains(&display::agent_color("alpha")));
+    // An agent's colour depends on its name only; people keep Word's colour by order.
+    assert_eq!(display::author_color(3, "Agent (alpha)"), display::agent_color("alpha"));
+    assert_eq!(display::author_color(1, "Ana"), display::revision_color(1));
+    assert_eq!(hidden_revisions(&d, &["Agent (alpha)".into()]), [1]);
+}
+
 #[test]
 fn deleted_soft_hyphen_is_no_hyphenation_point_without_markup() {
     // "ab\u{ad}cdef" in a column where "ab-" fits but the whole word does not; only the soft
@@ -2874,9 +2914,9 @@ fn objects_left_out_through_the_table_style_formatting() {
     p.insert_object(1, rect_shape(10.0, 10.0, Default::default()), &Default::default()).unwrap();
     let d = Document::from_text("");
     let hidden = wordcraft_doc::CharProps { hidden: Some(true), ..Default::default() };
-    assert!(!left_out_objects(&d, &p, None, false, false)(0));
-    assert!(left_out_objects(&d, &p, Some(&hidden), false, false)(0));
-    assert!(!left_out_objects(&d, &p, Some(&hidden), true, false)(0), "hidden text shown");
+    assert!(!left_out_objects(&d, &p, None, false, false, &[])(0));
+    assert!(left_out_objects(&d, &p, Some(&hidden), false, false, &[])(0));
+    assert!(!left_out_objects(&d, &p, Some(&hidden), true, false, &[])(0), "hidden text shown");
 }
 
 #[test]

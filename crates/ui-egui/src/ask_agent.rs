@@ -33,14 +33,16 @@ pub const MAX_LISTEN_MS: u64 = 60_000;
 pub const DEFAULT_LISTEN_MS: u64 = 30_000;
 /// Longest instruction and reply kept, in characters; longer ones are cut with "…".
 pub const MAX_TEXT_CHARS: usize = 4000;
+/// Longest closing comment kept, in characters.
+pub const MAX_COMMENT_CHARS: usize = 2000;
 /// Longest selected text sent with a request, in bytes (`truncated` says when it was cut).
 pub const MAX_SELECTION_BYTES: usize = 100_000;
 /// Requests kept (answered and cancelled ones are dropped first).
 const KEEP: usize = 20;
-/// Requests shown in the window at once (the newest).
-const SHOWN: usize = 3;
+/// Answered and cancelled requests shown in the corner card (the newest); open ones all show.
+pub(crate) const SHOWN: usize = 3;
 /// Width of the instruction box and the requests card.
-const WIDTH: f32 = 340.0;
+pub(crate) const WIDTH: f32 = 340.0;
 /// Width for a long answer, which wraps rather than being cut.
 const WIDE: f32 = 440.0;
 
@@ -66,7 +68,8 @@ impl State {
             State::Cancelled => "cancelled",
         }
     }
-    fn open(self) -> bool {
+    /// Waiting or being worked on.
+    pub fn open(self) -> bool {
         matches!(self, State::Waiting | State::Working)
     }
 }
@@ -91,6 +94,9 @@ pub struct Request {
     pub reply: String,
     /// The agent that took it, as it named itself (`agent.listen {agent}`), cleaned up.
     pub agent: Option<String>,
+    /// The agent's closing comment (`agent.reply {comment}`), anchored on the request's text once
+    /// it is answered ([`crate::agent_queue`]).
+    pub comment: Option<String>,
     /// When an agent took it (`now_ms`).
     taken_ms: f64,
     /// When the person asked (`now_ms`), for the time shown while it runs.
@@ -113,10 +119,7 @@ impl Request {
 
     /// The author of the agent's edits and comments for this request: `Agent (name)`.
     pub fn author(&self) -> String {
-        match &self.agent {
-            Some(name) => format!("Agent ({name})"),
-            None => "Agent".into(),
-        }
+        wordcraft_doc::agents::author(self.agent.as_deref())
     }
 
     /// What the window shows for it: the person's words, or the action's label (English; shown
@@ -205,6 +208,7 @@ impl AgentHub {
             agent: None,
             taken_ms: 0.0,
             asked_ms: crate::now_ms(),
+            comment: None,
         };
         let id = {
             let mut s = self.lock();
@@ -336,6 +340,26 @@ impl AgentHub {
         r
     }
 
+    /// The closing comment for request `id`, before its answer closes it (`agent.reply {comment}`):
+    /// anchored on the request's text with the agent as author once it is answered. Ignored for a
+    /// request the person cancelled; refused for one that is gone or already answered.
+    pub fn set_comment(&self, id: u64, comment: &str) -> Result<(), String> {
+        let comment = cap_chars(comment.trim(), MAX_COMMENT_CHARS);
+        if comment.is_empty() {
+            return Err("`comment` is empty: leave it out, or write a sentence on what you did".into());
+        }
+        let mut s = self.lock();
+        match s.requests.iter_mut().find(|r| r.id == id) {
+            None => Err(format!("no Ask Agent request {id}: it was never made, or the person dismissed it")),
+            Some(r) if r.state == State::Answered => Err(format!("Ask Agent request {id} is already answered")),
+            Some(r) if r.state == State::Cancelled => Ok(()),
+            Some(r) => {
+                r.comment = Some(comment);
+                Ok(())
+            }
+        }
+    }
+
     /// The name of the agent that last listened, when it gave one.
     pub fn agent_name(&self) -> Option<String> {
         self.lock().last_agent.clone()
@@ -429,6 +453,9 @@ pub struct AskAgent {
     /// The person's recent instructions, newest first. Kept for this session only: they can
     /// quote the document, so they aren't written to the preferences.
     pub history: Vec<String>,
+    /// What the window keeps per request: its text's range, held for the agent, and its closing
+    /// comment ([`crate::agent_queue`]).
+    pub queue: crate::agent_queue::Queue,
 }
 
 /// The bubble at the selection.
@@ -529,8 +556,12 @@ fn document(app: &mut WordApp) -> Value {
 
 /// `ui.askAgent`. No params: open the bubble at the selection (refused, with the reason, when no
 /// agent is listening). `instruction`: send it without the box; `action`: send that quick action.
-/// `cancel`: cancel that request. `close`: close the bubble.
+/// `cancel`: cancel that request. `close`: close the bubble. `release`, `goTo`, `anchorComment`:
+/// [`crate::agent_queue::command`].
 pub fn command(app: &mut WordApp, p: &Value) -> Result<Value, String> {
+    if let Some(r) = crate::agent_queue::command(app, p) {
+        return r;
+    }
     if let Some(id) = p.get("cancel") {
         let id = id.as_u64().ok_or("`cancel` is a request id")?;
         let cancelled = app.ask_agent.hub.as_ref().is_some_and(|h| h.cancel(id));
@@ -551,12 +582,14 @@ pub fn command(app: &mut WordApp, p: &Value) -> Result<Value, String> {
             crate::agent_actions::find(id).ok_or_else(|| format!("no quick action `{id}` (ui.inspect lists them under askAgent.actions)"))?;
         let (selection, document) = (selection(app), document(app));
         let id = hub.ask_with("", Some(&action), selection, document)?;
+        crate::agent_queue::track(app, id);
         return Ok(json!({"id": id}));
     }
     if let Some(text) = p.get("instruction") {
         let text = text.as_str().ok_or("`instruction` is text")?;
         let (selection, document) = (selection(app), document(app));
         let id = hub.ask(text, selection, document)?;
+        crate::agent_queue::track(app, id);
         remember(&mut app.ask_agent.history, text);
         return Ok(json!({"id": id}));
     }
@@ -571,15 +604,19 @@ pub fn command(app: &mut WordApp, p: &Value) -> Result<Value, String> {
 /// Run `command` for Ask Agent request `id` (an agent's `engine.execute` with `request`): its
 /// edits become tracked changes by the agent ([`Request::author`]), whatever the document's Track
 /// Changes setting, which is left alone. Refused once the person cancelled the request or it was
-/// answered, and for edits to a request that asks for an answer only (`replyOnly`).
+/// answered, and for edits to a request that asks for an answer only (`replyOnly`). The agent is
+/// the session's editor meanwhile: text another agent holds is refused ([`crate::agent_queue`]).
 pub fn run_for(app: &mut WordApp, id: u64, command: &str, run: impl FnOnce(&mut WordApp) -> Result<Value, String>) -> Result<Value, String> {
+    crate::agent_queue::sync(app);
     let request = app.ask_agent.hub.as_ref().and_then(|h| h.request(id)).ok_or_else(|| format!("no Ask Agent request {id}"))?;
     match request.state {
         State::Cancelled => return Err(format!("Ask Agent request {id} was cancelled by the person: `{command}` was not run")),
         State::Answered => return Err(format!("Ask Agent request {id} is already answered: `{command}` was not run")),
         State::Waiting | State::Working => {}
     }
-    let mutates = app.session.registry.get(command).is_some_and(|c| c.mutates);
+    let mutates = app.session.registry.get(command).is_some_and(|c| c.mutates)
+        || matches!(command, "edit.undo" | "edit.undoTo" | "edit.redo")
+        || wordcraft_engine::locks::replaces_document(command);
     if mutates && request.apply == Apply::ReplyOnly {
         return Err(format!(
             "Ask Agent request {id} asks for an answer only: the document must not change, so `{command}` was not run; answer with agent.reply"
@@ -587,9 +624,35 @@ pub fn run_for(app: &mut WordApp, id: u64, command: &str, run: impl FnOnce(&mut 
     }
     let author = std::mem::replace(&mut app.session.author, request.author());
     let forced = std::mem::replace(&mut app.session.force_tracking, true);
-    let r = run(app);
+    let editor = app.session.editor.replace(request.author());
+    // Releasing a range removes contention, not the request's attachment to its own edits.
+    // During this agent's command, keep its edge insertions inside the followed range.
+    let released_lock = app.ask_agent.queue.tracked.get(&id).filter(|t| t.released).and_then(|t| t.lock);
+    if let Some(lock) = released_lock {
+        app.session.locks.set_owner(lock, Some(&request.author()));
+    }
+    let scope = crate::agent_queue::range(app, &request);
+    let before = mutates.then(|| app.session.edit_snapshot());
+    let mut r = run(app);
+    if r.is_ok()
+        && let Some(before) = before
+    {
+        let within = scope.as_ref().is_some_and(|(start, end)| wordcraft_engine::locks::changes_within(before.doc(), &app.session.doc, start, end));
+        if !within {
+            app.session.restore(before);
+            r = Err(format!(
+                "Ask Agent request {id}: `{command}` was not run because it changes text outside the requested range; ask the person for a new request on that text"
+            ));
+        } else if before.doc().body != app.session.doc.body || before.doc().parts != app.session.doc.parts {
+            app.ask_agent.queue.tracked.entry(id).or_default().changed = true;
+        }
+    }
+    if let Some(lock) = released_lock {
+        app.session.locks.set_owner(lock, None);
+    }
     app.session.author = author;
     app.session.force_tracking = forced;
+    app.session.editor = editor;
     r
 }
 
@@ -686,7 +749,7 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) {
     }
     show_chip(app, ctx, viewport);
     let shown = show_bubble(app, ctx, viewport);
-    show_requests(app, ctx, viewport, shown);
+    crate::agent_queue::show_list(app, ctx, viewport, shown);
 }
 
 fn show_chip(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) {
@@ -928,7 +991,7 @@ fn quick_actions(ui: &mut egui::Ui) -> Option<String> {
 }
 
 /// A request as the window names it: the person's words, or the action's label translated.
-fn shown_title(r: &Request) -> String {
+pub(crate) fn shown_title(r: &Request) -> String {
     match &r.action {
         Some(a) => tl!(&a.label).to_string(),
         None => r.instruction.clone(),
@@ -939,7 +1002,7 @@ fn shown_title(r: &Request) -> String {
 /// as soon as the agent has it, with a spinner (a still line with animations off) and the time
 /// since it was sent; the agent's latest progress note; then its answer, whole (it wraps, and
 /// scrolls when long), or Cancelled.
-fn status(ui: &mut egui::Ui, r: &Request, present: bool, animate: bool, listening: Option<&str>) {
+pub(crate) fn status(ui: &mut egui::Ui, r: &Request, present: bool, animate: bool, listening: Option<&str>) {
     let t = Tokens::get(ui.ctx());
     let secs = ((crate::now_ms() - r.asked_ms) / 1000.0).max(0.0) as u64;
     let busy = |ui: &mut egui::Ui, text: &str| {
@@ -986,7 +1049,7 @@ fn status(ui: &mut egui::Ui, r: &Request, present: bool, animate: bool, listenin
 
 /// The bubble's and the card's look: the mini toolbar's (menu fill, strong border, 6 pt corners,
 /// a soft shadow), with room inside.
-fn card(t: &Tokens) -> egui::Frame {
+pub(crate) fn card(t: &Tokens) -> egui::Frame {
     egui::Frame::new()
         .fill(t.menu)
         .stroke(egui::Stroke::new(1.0, t.border_strong))
@@ -997,7 +1060,7 @@ fn card(t: &Tokens) -> egui::Frame {
 
 /// The bubble's title row: the Ask Agent icon and name, and a close button. True when the close
 /// button was clicked.
-fn header(ui: &mut egui::Ui, t: &Tokens) -> bool {
+pub(crate) fn header(ui: &mut egui::Ui, t: &Tokens) -> bool {
     ui.horizontal(|ui| {
         let (icon, _) = ui.allocate_exact_size(vec2(16.0, 16.0), egui::Sense::hover());
         crate::icons::paint(ui.painter(), icon, "askAgent", t.icon, t.accent);
@@ -1020,50 +1083,6 @@ fn close_button(ui: &mut egui::Ui, t: &Tokens) -> bool {
     let label = tl!("Close");
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     resp.on_hover_text(label).clicked()
-}
-
-/// The requests the bubble doesn't show, newest last, in the canvas's bottom-right corner.
-fn show_requests(app: &mut WordApp, ctx: &egui::Context, viewport: Rect, in_bubble: Option<u64>) {
-    let Some(hub) = app.ask_agent.hub.clone() else { return };
-    let requests: Vec<Request> = hub.requests().into_iter().filter(|r| Some(r.id) != in_bubble).collect();
-    if requests.is_empty() {
-        return;
-    }
-    let present = hub.agent_present();
-    let listening = hub.agent_name();
-    let animate = app.animations_on();
-    let t = Tokens::get(ctx);
-    egui::Area::new(egui::Id::new("wc_ask_agent_requests"))
-        .order(Order::Foreground)
-        .pivot(Align2::RIGHT_BOTTOM)
-        .fixed_pos(viewport.right_bottom() - vec2(16.0, 16.0))
-        .show(ctx, |ui| {
-            card(&t).show(ui, |ui| {
-                ui.set_width(WIDTH);
-                let mut close = false;
-                if header(ui, &t) {
-                    close = true;
-                }
-                for r in requests.iter().rev().take(SHOWN).rev() {
-                    ui.separator();
-                    ui.add(egui::Label::new(egui::RichText::new(shown_title(r)).small().color(t.text_dim)).truncate());
-                    status(ui, r, present, animate, listening.as_deref());
-                    if r.state.open() {
-                        if ui.small_button(tl!("Cancel")).clicked() {
-                            hub.cancel(r.id);
-                        }
-                    } else if ui.small_button(tl!("Dismiss")).clicked() {
-                        hub.dismiss(r.id);
-                    }
-                }
-                // Closing the card puts away the answered and cancelled requests; open ones stay.
-                if close {
-                    for r in &requests {
-                        hub.dismiss(r.id);
-                    }
-                }
-            });
-        });
 }
 
 #[cfg(test)]

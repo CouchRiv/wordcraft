@@ -168,6 +168,20 @@ pub struct LayoutOptions {
     pub outline: Option<outline::OutlineView>,
     /// What the spelling check skips, and whether grammar is marked too (File › Options › Proofing).
     pub proof: ProofOptions,
+    /// Show Markup › Specific People: authors whose tracked changes aren't shown. Their deletions
+    /// take no space and draw nothing, as with No Markup for them alone; their insertions read as
+    /// plain text (the display leaves out their marks, [`display::DisplayOptions::hidden_reviewers`]).
+    pub hidden_reviewers: Vec<String>,
+}
+
+/// The revisions (indexes into `Document::revisions`) by the authors in `reviewers`, sorted.
+pub fn hidden_revisions(doc: &Document, reviewers: &[String]) -> Vec<u32> {
+    if reviewers.is_empty() {
+        return Vec::new();
+    }
+    let hidden: Vec<u32> =
+        doc.revisions.iter().enumerate().filter(|(_, r)| reviewers.contains(&r.author)).filter_map(|(i, _)| u32::try_from(i).ok()).collect();
+    hidden
 }
 
 /// File › Options › Proofing choices that change the squiggles.
@@ -508,6 +522,7 @@ fn env_hash(doc: &Document, opts: &LayoutOptions) -> u64 {
         wordcraft_proof::dictionary_generation(),
         hyphenation_key(doc),
         outline,
+        &opts.hidden_reviewers,
     ))
 }
 
@@ -595,6 +610,9 @@ struct Ctx<'a> {
     /// Whether tracked deletions are left out in the story being laid out
     /// ([`LayoutOptions::hides_deleted`]): the body's, or the story of the [`layout_box`] at work.
     hide_deleted: bool,
+    /// Revisions of hidden reviewers ([`LayoutOptions::hidden_reviewers`], [`hidden_revisions`]):
+    /// their deletions are left out wherever they are.
+    hidden: &'a [u32],
     /// Whether body text (or its notes) laid out so far shows a page total (`NUMPAGES`,
     /// `SECTIONPAGES`), which is only known once the whole body is paginated.
     uses_totals: bool,
@@ -644,6 +662,7 @@ impl Ctx<'_> {
             show_hidden: false,
             field_codes: false,
             hide_deleted: false,
+            hidden_revisions: &[],
             table: None,
             proofing: None,
             numeral: self.opts.numeral,
@@ -718,6 +737,7 @@ impl Ctx<'_> {
             show_hidden: self.opts.show_hidden,
             field_codes: self.opts.field_codes,
             hide_deleted: self.hide_deleted,
+            hidden_revisions: self.hidden,
             table,
             proofing: self.opts.proofing.then_some(self.opts.proof),
             numeral: self.opts.numeral,
@@ -737,14 +757,21 @@ impl Ctx<'_> {
 /// text unless `show_hidden`, or in a tracked deletion with `hide_deleted`. `table_chr` is the
 /// cell's table-style character formatting ([`para::CellText::chr`]), resolved as the paragraph is
 /// laid out with (`StyleSheet::resolve_char_in`).
-fn left_out_objects(doc: &Document, p: &Paragraph, table_chr: Option<&CharProps>, show_hidden: bool, hide_deleted: bool) -> impl Fn(usize) -> bool {
+fn left_out_objects(
+    doc: &Document,
+    p: &Paragraph,
+    table_chr: Option<&CharProps>,
+    show_hidden: bool,
+    hide_deleted: bool,
+    hidden: &[u32],
+) -> impl Fn(usize) -> bool {
     let mut left = Vec::new();
-    // Nothing can be left out with hidden text shown and markup on.
-    if (hide_deleted || !show_hidden) && !p.objects.is_empty() {
+    // Nothing can be left out with hidden text shown, markup on and every reviewer shown.
+    if (hide_deleted || !show_hidden || !hidden.is_empty()) && !p.objects.is_empty() {
         let style = p.props.style.as_deref();
         let is_left = |c: &CharProps| {
             let rc = doc.styles.resolve_char_in(style, table_chr, c);
-            para::left_out(&rc, show_hidden, hide_deleted)
+            para::left_out(&rc, show_hidden, hide_deleted, hidden)
         };
         // Runs and objects are both in order: one walk finds each object's run (past the last run,
         // the paragraph mark, as `props_of_char` gives), resolving a run's formatting only once.
@@ -774,7 +801,7 @@ fn left_out_objects(doc: &Document, p: &Paragraph, table_chr: Option<&CharProps>
 /// section or (footnotes) on each page. `pages` gives the page each footnote was placed on by an
 /// earlier pass (empty: numbered on). With `hide_deleted`, notes whose reference mark is a
 /// tracked deletion are left out, as in the final text.
-fn note_info(doc: &Document, hide_deleted: bool, pages: &HashMap<u32, usize>) -> HashMap<u32, fields::NoteNum> {
+fn note_info(doc: &Document, hide_deleted: bool, hidden: &[u32], pages: &HashMap<u32, usize>) -> HashMap<u32, fields::NoteNum> {
     use wordcraft_doc::section::NoteRestart;
     let sections = doc.sections();
     let opts: Vec<[wordcraft_doc::section::NoteOptions; 2]> =
@@ -790,7 +817,7 @@ fn note_info(doc: &Document, hide_deleted: bool, pages: &HashMap<u32, usize>) ->
     doc.objects_in_reading_order_by_block(&mut |block, p, k| {
         let key = p as *const Paragraph as usize;
         if cur.as_ref().is_none_or(|(at, _)| *at != key) {
-            let deleted = left_out_objects(doc, p, None, true, hide_deleted);
+            let deleted = left_out_objects(doc, p, None, true, hide_deleted, hidden);
             cur = Some((key, (0..p.objects.len()).map(deleted).collect()));
         }
         if cur.as_ref().is_some_and(|(_, deleted)| deleted.get(k).copied().unwrap_or(false)) {
@@ -830,7 +857,7 @@ fn note_info(doc: &Document, hide_deleted: bool, pages: &HashMap<u32, usize>) ->
 /// Note part ids → numbers, numbered on (see [`note_info`]).
 #[cfg(test)]
 fn note_numbers(doc: &Document, hide_deleted: bool) -> HashMap<u32, u32> {
-    note_info(doc, hide_deleted, &HashMap::new()).into_iter().map(|(id, n)| (id, n.n)).collect()
+    note_info(doc, hide_deleted, &[], &HashMap::new()).into_iter().map(|(id, n)| (id, n.n)).collect()
 }
 
 /// The page each footnote's text starts on.
@@ -934,7 +961,7 @@ fn layout_box(
                 // Floating objects anchored here: place them, then wrap the text around them.
                 // One left out of the layout (hidden, or deleted in the final text) takes no room.
                 let mut floats = HashMap::new();
-                let left_out = left_out_objects(ctx.doc, p, table.map(|t| &t.chr), ctx.opts.show_hidden, ctx.hide_deleted);
+                let left_out = left_out_objects(ctx.doc, p, table.map(|t| &t.chr), ctx.opts.show_hidden, ctx.hide_deleted, ctx.hidden);
                 for (oi, o) in p.objects.iter().enumerate() {
                     let Some((w, h, float)) = floating(o) else { continue };
                     if left_out(oi) {
@@ -1755,8 +1782,9 @@ fn layout_pass(
         cache.env = env;
     }
     cache.used.clear();
+    let hidden = hidden_revisions(doc, &opts.hidden_reviewers);
     // Note references are counted as the body shows them.
-    let notes = note_info(doc, opts.hides_deleted(StoryRef::Body), note_pages);
+    let notes = note_info(doc, opts.hides_deleted(StoryRef::Body), &hidden, note_pages);
     let notes_hash = hash_of(&{
         let mut v: Vec<_> = notes.iter().map(|(a, b)| (*a, b.n, b.fmt)).collect();
         v.sort_by_key(|(a, ..)| *a);
@@ -1767,6 +1795,7 @@ fn layout_pass(
         cache,
         opts,
         hide_deleted: opts.hides_deleted(StoryRef::Body),
+        hidden: &hidden,
         counters: Counters::default(),
         fields: FieldCtx {
             page: 1,
@@ -2527,7 +2556,7 @@ fn anchor_floats(
         let frame = PageFrame { sect: pb.sect, origin: (0.0, 0.0) };
         // An object left out of the layout (hidden, or deleted in the final text) is not placed, so
         // it takes no room either.
-        let left_out = left_out_objects(ctx.doc, p, None, ctx.opts.show_hidden, ctx.hide_deleted);
+        let left_out = left_out_objects(ctx.doc, p, None, ctx.opts.show_hidden, ctx.hide_deleted, ctx.hidden);
         for (oi, o) in p.objects.iter().enumerate() {
             let Some((w, h, float)) = floating(o) else { continue };
             if left_out(oi) {
@@ -2578,7 +2607,7 @@ fn place_objects(
     let (mut behind, mut front) = (Vec::new(), Vec::new());
     let Some(fl) = pl.lines.get(l0) else { return (behind, front) };
     // Objects left out of the layout (hidden, or deleted in the final text) aren't placed.
-    let left_out = left_out_objects(ctx.doc, p, at.table_chr, ctx.opts.show_hidden, ctx.hide_deleted);
+    let left_out = left_out_objects(ctx.doc, p, at.table_chr, ctx.opts.show_hidden, ctx.hide_deleted, ctx.hidden);
     for li in l0..l1 {
         let Some(line) = pl.lines.get(li) else { continue };
         for k in line.c0..line.c1 {
@@ -3072,6 +3101,7 @@ fn next_first_line(ctx: &mut Ctx, block: usize, width: f32, depth: usize) -> f32
                 show_hidden: ctx.opts.show_hidden,
                 field_codes: ctx.opts.field_codes,
                 hide_deleted: ctx.opts.hides_deleted(StoryRef::Body),
+                hidden_revisions: ctx.hidden,
                 table: None,
                 proofing: None,
                 numeral: ctx.opts.numeral,

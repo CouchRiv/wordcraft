@@ -558,6 +558,7 @@ fn view_key(app: &WordApp, dim_body: bool) -> u64 {
     let v = &app.session.view;
     (v.marks, app.session.prefs.marks, v.show_markup, v.dark_mode, wordcraft_render::DARK_PAPER, v.hide_ink, v.draw.replay).hash(&mut h);
     app.session.prefs.markup.hash(&mut h);
+    v.hidden_reviewers.hash(&mut h);
     dim_body.hash(&mut h);
     format!("{:?}{:?}", app.session.doc.settings.page_color, app.session.doc.settings.watermark).hash(&mut h);
     app.session.doc.media.len().hash(&mut h);
@@ -935,6 +936,7 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                 // Ink Replay draws the ink itself, stroke by stroke, over pages without it.
                 opts.display.hide_ink = app.session.view.hide_ink || app.session.view.draw.replay;
                 opts.display.revisions = app.session.prefs.markup.clone();
+                opts.display.hidden_reviewers = app.session.view.hidden_reviewers.clone();
                 opts.dark = dark_page;
                 opts.dark_paper = dark_paper;
                 opts.display.dim_header = !dim_body;
@@ -1095,6 +1097,8 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
         app.canvas.mini_anchor = first;
         // Content controls: the frame of the one the caret is in (all of them in Design Mode).
         crate::content_controls::paint(app, &painter, &t, &layout, &rects, geo.scale);
+        // Ask Agent: the text each agent is working on, in its colour, with its name.
+        crate::agent_queue::paint(app, &painter, &layout, &rects, geo.scale);
         // Read Aloud: the sentence being spoken.
         if let Some((a, b)) = crate::read_aloud::highlight(app) {
             for (pi, r) in layout.selection_rects(&app.session.doc, &a, &b, app.session.page_hint) {
@@ -1474,7 +1478,7 @@ fn balloons(app: &mut WordApp, ui: &mut Ui, painter: &egui::Painter, rects: &[Re
                         authors.push(author.clone());
                         authors.len() - 1
                     });
-                    let color = palette.get(ai % palette.len()).copied().unwrap_or(t.blue);
+                    let color = balloon_color(&author, ai, &palette, t.blue);
                     let fs = (11.0 * page_scale / PX_PER_PT).clamp(8.0, 16.0);
                     let anchor = pos2(pr.min.x + ax * page_scale, pr.min.y + ay * page_scale);
                     let top = (anchor.y - 12.0).max(next_y);
@@ -1503,7 +1507,7 @@ fn balloons(app: &mut WordApp, ui: &mut Ui, painter: &egui::Painter, rects: &[Re
                 authors.push(author.clone());
                 authors.len() - 1
             });
-            let color = palette.get(ai % palette.len()).copied().unwrap_or(t.blue);
+            let color = balloon_color(&author, ai, &palette, t.blue);
             let fs = (11.0 * page_scale / PX_PER_PT).clamp(8.0, 16.0);
             let thread: Vec<u32> = replies.get(id).cloned().unwrap_or_default();
             let anchor = pos2(pr.min.x + ax * page_scale, pr.min.y + ay * page_scale);
@@ -1576,6 +1580,15 @@ enum Balloon {
     /// A tracked formatting change, move or deletion: its author and "Formatted: …" /
     /// "Moved from" / "Deleted: …".
     Format(String, String),
+}
+
+/// A balloon's colour: an agent's own colour (the same as its marks on the page and in the Ask
+/// Agent request list, [`wordcraft_layout::display::agent_color`]), else the palette's by author.
+fn balloon_color(author: &str, ai: usize, palette: &[Color32], fallback: Color32) -> Color32 {
+    match wordcraft_doc::agents::name_of(author) {
+        Some(name) => crate::theme::c32(wordcraft_layout::display::agent_color(name)),
+        None => palette.get(ai % palette.len().max(1)).copied().unwrap_or(fallback),
+    }
 }
 
 fn author_name(a: &str) -> String {

@@ -2128,3 +2128,19 @@
 	Summarize	Résumer
 	Continue writing	Poursuivre la rédaction
 	Explain	Expliquer
+# Ask Agent: several agents, Show Markup › Specific People
+	Agent	Agent
+	{agent} · holds this text	{agent} · réserve ce texte
+	Waiting	En attente
+	Working	En cours
+	Answered	Répondu
+	{count} requests open	{count} demandes ouvertes
+	Not taken yet	Pas encore prise en charge
+	Other agents can't change this text until it is done.	Les autres agents ne peuvent pas modifier ce texte avant la fin de la demande.
+	Release	Libérer
+	Let other agents change this text while the request runs	Laisser les autres agents modifier ce texte pendant la demande
+	Go to text	Aller au texte
+	Specific People	Personnes spécifiques
+	All Reviewers	Tous les réviseurs
+	Accept All Changes Shown	Accepter toutes les modifications affichées
+	Reject All Changes Shown	Refuser toutes les modifications affichées

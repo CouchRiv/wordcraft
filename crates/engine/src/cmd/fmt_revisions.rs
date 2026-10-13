@@ -8,6 +8,7 @@
 //! Like Word, an author's later changes to the same text keep the formatting before their first
 //! one, and formatting changed back to what it was stops being a change.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -310,6 +311,68 @@ pub fn resolve_containers(blocks: &mut Blocks, accept: bool, depth: usize) {
                     }
                 }
             }
+        }
+    }
+}
+
+/// [`resolve_containers`] for the changes of the revisions `ids` only; whether there were any.
+pub fn resolve_containers_of(blocks: &mut Blocks, ids: &BTreeSet<u32>, accept: bool, depth: usize) -> bool {
+    if depth > MAX_DEPTH {
+        return false;
+    }
+    let mine = |rev: Option<u32>| rev.is_some_and(|r| ids.contains(&r));
+    let mut found = false;
+    for b in blocks.iter_mut() {
+        // Only what holds such a change is copied (undo snapshots share the rest).
+        if !mentions(b, ids, depth) {
+            continue;
+        }
+        match Arc::make_mut(b) {
+            Block::Para(p) => {
+                if let Some(s) = p.section.as_deref_mut() {
+                    resolve_section(s, accept);
+                    p.touch();
+                    found = true;
+                }
+            }
+            Block::Table(t) => {
+                if mine(t.props.fmt_change.as_ref().map(|c| c.rev)) {
+                    resolve_table(t, accept);
+                    found = true;
+                }
+                for r in &mut t.rows {
+                    if mine(r.props.fmt_change.as_ref().map(|c| c.rev)) {
+                        resolve_row(r, accept);
+                        found = true;
+                    }
+                    for c in &mut r.cells {
+                        if mine(c.props.fmt_change.as_ref().map(|c| c.rev)) {
+                            resolve_cell(c, accept);
+                            found = true;
+                        }
+                        found |= resolve_containers_of(&mut c.blocks, ids, accept, depth + 1);
+                    }
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Whether `b` holds a section, table, row or cell change of the revisions `ids`.
+fn mentions(b: &Block, ids: &BTreeSet<u32>, depth: usize) -> bool {
+    let mine = |rev: Option<u32>| rev.is_some_and(|r| ids.contains(&r));
+    match b {
+        Block::Para(p) => mine(p.section.as_ref().and_then(|s| s.fmt_change.as_ref().map(|c| c.rev))),
+        Block::Table(t) => {
+            depth <= MAX_DEPTH
+                && (mine(t.props.fmt_change.as_ref().map(|c| c.rev))
+                    || t.rows.iter().any(|r| {
+                        mine(r.props.fmt_change.as_ref().map(|c| c.rev))
+                            || r.cells
+                                .iter()
+                                .any(|c| mine(c.props.fmt_change.as_ref().map(|c| c.rev)) || c.blocks.iter().any(|b| mentions(b, ids, depth + 1)))
+                    }))
         }
     }
 }

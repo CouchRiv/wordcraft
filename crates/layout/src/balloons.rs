@@ -20,7 +20,7 @@ use wordcraft_doc::props::{Border, BorderStyle, CharProps, Rgb, TextColor};
 use wordcraft_doc::{Document, Paragraph, Pos, StoryRef};
 use wordcraft_geom::Rect;
 
-use crate::display::revision_color;
+use crate::display::author_color;
 use crate::{BoxLayout, Ctx, DocLayout, Placed, fit_box, layout_box, push_para};
 
 /// Width of the markup area beside each page (points): the editor's.
@@ -135,7 +135,7 @@ pub(crate) fn add(ctx: &mut Ctx, lay: &mut DocLayout) {
     for (id, pos) in anchors {
         let Some(caret) = lay.caret_on(&pos, 0) else { continue };
         let Some(c) = doc.comments.get(&id) else { continue };
-        let color = revision_color(author_index(doc, &c.author));
+        let color = author_color(author_index(doc, &c.author), &c.author);
         let mut thread = vec![id];
         thread.extend(threads.get(&id).into_iter().flatten().copied());
         let x = STRIPE + PAD;

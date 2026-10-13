@@ -136,8 +136,8 @@ fn peer_open(s: &TcpStream) -> bool {
     }
 }
 
-/// `agent.listen {timeoutMs?, agent?}` and `agent.reply {id, text, done?}` (Ask Agent): the
-/// reply line, and the request handed out (to put back if the reply can't be written).
+/// `agent.listen {timeoutMs?, agent?}` and `agent.reply {id, text, done?, comment?}` (Ask Agent):
+/// the reply line, and the request handed out (to put back if the reply can't be written).
 fn agent_method(agents: &AgentHub, method: &str, p: &Value, probe: &TcpStream) -> (Value, Option<u64>) {
     let err = |e: &str| json!({"ok": false, "error": e});
     match method {
@@ -159,12 +159,49 @@ fn agent_method(agents: &AgentHub, method: &str, p: &Value, probe: &TcpStream) -
             let Some(id) = p.get("id").and_then(Value::as_u64) else { return (err("missing `id` (the request's id from agent.listen)"), None) };
             let Some(text) = p.get("text").and_then(Value::as_str) else { return (err("missing `text` (what to show in the window)"), None) };
             let done = p.get("done").and_then(Value::as_bool).unwrap_or(true);
+            // The closing comment goes with the answer; the window anchors it on the request's text.
+            match p.get("comment") {
+                None | Some(Value::Null) => {}
+                Some(Value::String(_)) if !done => {
+                    return (err("`comment` closes the request: send it with the answer (done: true), not with a progress note"), None);
+                }
+                Some(Value::String(c)) => {
+                    if let Err(e) = agents.set_comment(id, c) {
+                        return (err(&e), None);
+                    }
+                }
+                Some(_) => return (err("`comment` is text: a sentence on what you did, anchored as a comment on the text"), None),
+            }
             match agents.reply(id, text, done) {
                 Ok(v) => (json!({"ok": true, "result": v}), None),
                 Err(e) => (err(&e), None),
             }
         }
     }
+}
+
+/// How long an answer with a closing comment waits for the window to anchor it.
+const ANCHOR_WAIT: Duration = Duration::from_secs(10);
+
+/// After an answer with a closing comment (`agent.reply {comment}`), ask the window to anchor it
+/// now, so the agent learns the comment's id (`result.comment`). A window that doesn't answer in
+/// time (the screen is locked, it is busy) anchors it on its next frame: `comment` is then
+/// `"pending"`.
+fn anchor_comment(r: &mut Value, params: &Value, tx: &Sender<ControlRequest>, ctx: &egui::Context) {
+    let answered = r["ok"] == true && r["result"]["done"] == true && r["result"].get("cancelled").is_none();
+    let Some(id) = params.get("id").and_then(Value::as_u64).filter(|_| answered && params.get("comment").is_some_and(Value::is_string)) else {
+        return;
+    };
+    let (req, rrx) = ControlRequest::new("ui.askAgent", json!({"anchorComment": id}));
+    let anchored = tx.send(req).ok().and_then(|()| {
+        ctx.request_repaint();
+        rrx.recv_timeout(ANCHOR_WAIT).ok()
+    });
+    r["result"]["comment"] = match anchored {
+        Some(v) if v["ok"] == true => json!({"id": v["result"]["comment"]}),
+        Some(v) => json!({"error": v["error"]}),
+        None => json!("pending"),
+    };
 }
 
 /// The read side of a connection with an optional overall deadline: each read waits only for
@@ -292,7 +329,10 @@ fn serve(stream: TcpStream, tx: Sender<ControlRequest>, ctx: egui::Context, key:
         }
         // Ask Agent: answered here, never on the UI thread.
         if method == "agent.listen" || method == "agent.reply" {
-            let (r, taken) = agent_method(agents, &method, &params, &probe);
+            let (mut r, taken) = agent_method(agents, &method, &params, &probe);
+            if method == "agent.reply" {
+                anchor_comment(&mut r, &params, &tx, &ctx);
+            }
             if !reply(r) {
                 // The agent never got it: back in the queue for the next one.
                 if let Some(id) = taken {
@@ -716,6 +756,37 @@ mod tests {
         assert_eq!(agents.requests()[0].state, wordcraft_ui_egui::ask_agent::State::Waiting, "kept for the next agent");
         let mut next = authed(port);
         assert_eq!(next.call(r#"{"id":1,"method":"agent.listen","params":{"timeoutMs":1000}}"#)["result"]["id"], id);
+    }
+
+    /// A closing comment goes with the answer; the window is asked to anchor it at once and the
+    /// agent gets the comment's id. Junk comments, and comments on progress notes, are refused.
+    #[test]
+    fn agent_reply_with_a_comment_has_the_window_anchor_it() {
+        let (port, rx, agents) = boot_agents(FIRST_REQUEST);
+        let id = agents.ask("simplify", sel("Kilns"), json!({})).unwrap();
+        let mut c = authed(port);
+        c.call(r#"{"id":1,"method":"agent.listen","params":{"timeoutMs":1000,"agent":"alpha"}}"#);
+        for (line, why) in [
+            (
+                format!(r#"{{"id":2,"method":"agent.reply","params":{{"id":{id},"text":"Half way","done":false,"comment":"x"}}}}"#),
+                "closes the request",
+            ),
+            (format!(r#"{{"id":3,"method":"agent.reply","params":{{"id":{id},"text":"Done","comment":7}}}}"#), "is text"),
+            (format!(r#"{{"id":4,"method":"agent.reply","params":{{"id":{id},"text":"Done","comment":"   "}}}}"#), "is empty"),
+        ] {
+            let r = c.call(&line);
+            assert!(r["error"].as_str().is_some_and(|e| e.contains(why)), "{line}: {r}");
+        }
+        assert_eq!(agents.request(id).unwrap().state, wordcraft_ui_egui::ask_agent::State::Working, "still open");
+        c.send(&format!(r#"{{"id":5,"method":"agent.reply","params":{{"id":{id},"text":"Simplified.","comment":"Shorter words."}}}}"#));
+        // The window gets `ui.askAgent {anchorComment}` and answers with the comment's id.
+        let req = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!((req.method.as_str(), &req.params), ("ui.askAgent", &json!({"anchorComment": id})));
+        assert_eq!(agents.request(id).unwrap().comment.as_deref(), Some("Shorter words."));
+        let _ = req.reply.send(json!({"ok": true, "result": {"comment": 3}}));
+        let r = c.recv();
+        assert_eq!(r["result"]["comment"], json!({"id": 3}), "{r}");
+        assert_eq!(r["result"]["done"], true);
     }
 
     #[test]

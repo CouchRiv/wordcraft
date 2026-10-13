@@ -188,6 +188,30 @@ fn ask_agent_tools_carry_the_contract() {
     }
 }
 
+/// Several agents (stacked on the Ask Agent PRs): `reply_to_request` carries the closing comment
+/// the window anchors on the changed text, and `wait_for_request` the name the agent goes by.
+#[test]
+fn ask_agent_tools_carry_the_closing_comment_and_the_agents_name() {
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut s = Server::new(Box::new(FakeAgentApp { calls: calls.clone(), request: Some(ask_request()) }));
+    let tools = call(&mut s, 1, "tools/list", json!({}));
+    let schema = |name: &str| {
+        tools["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == name).map(|t| t["inputSchema"]["properties"].clone()).unwrap()
+    };
+    assert!(schema("reply_to_request").get("comment").is_some(), "{}", schema("reply_to_request"));
+    assert!(schema("wait_for_request").get("agent").is_some());
+    tool(&mut s, "wait_for_request", json!({"timeout_s": 1, "agent": "copy editor"}));
+    assert_eq!(calls.lock().unwrap().last().unwrap().1["agent"], "copy editor");
+    tool(&mut s, "reply_to_request", json!({"id": 7, "text": "Shortened.", "comment": "Cut the second clause."}));
+    let (m, p) = calls.lock().unwrap().last().cloned().unwrap();
+    assert_eq!((m.as_str(), p), ("agent.reply", json!({"id": 7, "text": "Shortened.", "done": true, "comment": "Cut the second clause."})));
+    for bad in [json!({"id": 7, "text": "x", "comment": 3}), json!({"timeout_s": 1, "agent": ["a"]})] {
+        let name = if bad.get("comment").is_some() { "reply_to_request" } else { "wait_for_request" };
+        let r = call(&mut s, 3, "tools/call", json!({"name": name, "arguments": bad}));
+        assert_eq!(r["result"]["isError"], true, "{r}");
+    }
+}
+
 #[test]
 fn channel_mode_declares_the_capability_and_pushes_requests() {
     use std::sync::Arc;

@@ -32,6 +32,9 @@ const MAX_OPEN: usize = 16;
 #[derive(Default, Debug)]
 pub struct AgentState {
     client: Option<String>,
+    /// The name was given explicitly (`--agent`, `wait_for_request {agent}`): the MCP client's
+    /// name doesn't replace it.
+    named: bool,
     open: Vec<u64>,
 }
 
@@ -41,17 +44,42 @@ impl AgentState {
         &self.open
     }
 
-    fn before(&self, method: &str, params: &mut Value) {
+    /// Name the agent: `explicit` (`--agent`, `wait_for_request {agent}`) wins over the MCP
+    /// client's name.
+    pub fn name(&mut self, name: &str, explicit: bool) {
+        if self.named && !explicit {
+            return;
+        }
+        let name: String = name.chars().filter(|c| !c.is_control()).take(64).collect();
+        if !name.trim().is_empty() {
+            self.client = Some(name);
+            self.named |= explicit;
+        }
+    }
+
+    /// The agent's name, when it has one.
+    pub fn agent(&self) -> Option<&str> {
+        self.client.as_deref()
+    }
+
+    fn before(&mut self, method: &str, params: &mut Value) {
         let Some(p) = params.as_object_mut() else { return };
         match method {
-            "agent.listen" if !p.contains_key("agent") => {
-                if let Some(c) = &self.client {
-                    p.insert("agent".into(), json!(c));
+            "agent.listen" => match p.get("agent").and_then(Value::as_str) {
+                Some(name) => self.name(name, true),
+                None => {
+                    if let Some(c) = &self.client {
+                        p.insert("agent".into(), json!(c));
+                    }
                 }
-            }
+            },
+            // Edits carry the open request (tracked as the agent's), else the agent's name, so the
+            // app can hold them back from text another agent is working on.
             "engine.execute" if !p.contains_key("request") => {
                 if let Some(id) = self.open.first() {
                     p.insert("request".into(), json!(id));
+                } else if let Some(c) = self.client.as_ref().filter(|_| !p.contains_key("agent")) {
+                    p.insert("agent".into(), json!(c));
                 }
             }
             _ => {}
@@ -175,6 +203,13 @@ impl Remote {
         self.agent.clone()
     }
 
+    /// Name the agent explicitly (`wordcraft-cli mcp --connect … --agent NAME`): its requests,
+    /// tracked changes and comments go under this name, whatever the MCP client calls itself.
+    pub fn with_agent_name(self, name: &str) -> Self {
+        self.agent().name(name, true);
+        self
+    }
+
     /// Use `state` (another connection's, [`Remote::agent_state`]) as this connection's.
     pub fn sharing(mut self, state: Arc<Mutex<AgentState>>) -> Self {
         self.agent = state;
@@ -292,7 +327,7 @@ impl Backend for Remote {
     }
 
     fn set_client(&mut self, name: &str) {
-        self.agent().client = Some(name.chars().filter(|c| !c.is_control()).take(64).collect());
+        self.agent().name(name, false);
     }
 }
 
@@ -489,6 +524,25 @@ mod tests {
         assert!(seen.recv_timeout(WAIT).unwrap().get("key").is_none());
     }
 
+    /// An explicit name (`--agent`, `wait_for_request {agent}`) wins over the MCP client's.
+    #[test]
+    fn an_explicit_agent_name_wins_over_the_clients() {
+        let (port, seen) = fake_app(|_| Some((json!({"ok": true, "result": {}}), false)));
+        let mut r = Remote::connect_with(&format!("127.0.0.1:{port}"), fixed_key("k")).unwrap().with_agent_name("reviewer one");
+        r.set_client("claude-code");
+        assert_eq!(r.agent_state().lock().unwrap().agent(), Some("reviewer one"));
+        r.call("agent.listen", json!({"timeoutMs": 1})).unwrap();
+        assert_eq!(seen.recv_timeout(WAIT).unwrap()["params"]["agent"], "reviewer one");
+        // Named on a wait: kept for the next calls too.
+        let mut r = Remote::connect_with(&format!("127.0.0.1:{port}"), fixed_key("k")).unwrap();
+        r.set_client("claude-code");
+        r.call("agent.listen", json!({"timeoutMs": 1, "agent": "second opinion"})).unwrap();
+        let _ = seen.recv_timeout(WAIT);
+        r.set_client("other");
+        r.call("engine.execute", json!({"command": "text.insert", "params": {"text": "x"}})).unwrap();
+        assert_eq!(seen.recv_timeout(WAIT).unwrap()["params"]["agent"], "second opinion");
+    }
+
     /// Ask Agent: the bridge names its agent on `agent.listen`, tags its edits with the open
     /// request until it is answered, and stops when the app says the request is over.
     #[test]
@@ -526,6 +580,10 @@ mod tests {
         assert!(r.call("engine.execute", json!({"command": "text.insert", "params": {"text": "d"}})).unwrap_err().contains("cancelled"));
         let _ = seen.recv_timeout(WAIT);
         assert!(r.agent_state().lock().unwrap().open().is_empty());
+        // With no request open, edits carry the agent's name: the app holds them back from text
+        // another agent is working on.
+        r.call("engine.execute", json!({"command": "text.insert", "params": {"text": "n"}})).unwrap();
+        assert_eq!(seen.recv_timeout(WAIT).unwrap()["params"]["agent"], "test-client");
         // Another connection of the same bridge (`--channel`) shares the state.
         let other = Remote::connect_with(&format!("127.0.0.1:{port}"), fixed_key("k")).unwrap().sharing(r.agent_state());
         other.agent_state().lock().unwrap().open.push(7);

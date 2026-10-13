@@ -52,9 +52,9 @@ and set `WORDCRAFT_CONTROL_KEY` to that app's key.
 |---|---|---|
 | `engine.execute` | `command`, `params` | the command's result (any id from `engine.commands`, including UI commands `ui.tab`, `ui.dialog`, `ui.backstage`, `ui.zotero.*` (see `docs/zotero.md`), `ui.language` (`{"value": "auto"|"en"|"zh-hans"|"zh-hant"|"ja"|"pt-br"|"es"|"uk"|"sr"|"sr-latn"|"et"|"tr"|"ru"|"pl"|"de"|"it"|"cs"|"hu"|"fr"}`), `ui.theme` (`{"value": "system"|"light"|"dark"}`; `system` follows the OS appearance, light when it reports none), `ui.interfaceSize` (`{"percent": 80–200}`, clamped; no value reads it; scales the interface on top of the system display scale, document zoom stays `view.zoom`), `ui.animations` (`{"value": "system"|"on"|"off"}`; no value reads it; `system` follows the system's animation setting, which the desktop app reads on Windows, macOS, Linux and the BSDs and the web app from `prefers-reduced-motion`, and means on where the system doesn't say; the result's `enabled` is what the setting comes to and `system` what the system reports, `null` when it doesn't say), `ui.fileBrowser` (desktop: `{"purpose": "document"|"picture"|"recipients"|"save"}` opens WordCraft's own file browser, for when the system file dialog doesn't show up, #576), `ui.caretAnimation` (`{"value": true|false}`; no value reads it; off, the caret jumps and blinks on and off instead of gliding and fading), `ui.startScreen` (`{"value": true|false}`; no value reads it; on, the default, the desktop and web apps start on File › Home when launched with nothing to open, #766)…) |
 | `engine.execute` | `command`, `params` | the command's result (any id from `engine.commands`, including UI commands `ui.tab`, `ui.dialog`, `ui.backstage`, `ui.zotero.*` (see `docs/zotero.md`), `ui.language` (`{"value": "auto"|"en"|"zh-hans"|"zh-hant"|"ja"|"pt-br"|"es"|"uk"|"sr"|"sr-latn"|"et"|"tr"|"ru"}`), `ui.theme` (`{"value": "system"|"light"|"dark"}`; `system` follows the OS appearance, light when it reports none), `ui.interfaceSize` (`{"percent": 80–200}`, clamped; no value reads it; scales the interface on top of the system display scale, document zoom stays `view.zoom`), `ui.animations` (`{"value": "system"|"on"|"off"}`; no value reads it; `system` follows the system's animation setting, which the desktop app reads on Windows, macOS, Linux and the BSDs and the web app from `prefers-reduced-motion`, and means on where the system doesn't say; the result's `enabled` is what the setting comes to and `system` what the system reports, `null` when it doesn't say), `ui.fileBrowser` (desktop: `{"purpose": "document"|"picture"|"recipients"|"save"}` opens WordCraft's own file browser, for when the system file dialog doesn't show up, #576), `ui.caretAnimation` (`{"value": true|false}`; no value reads it; off, the caret jumps and blinks on and off instead of gliding and fading), `ui.contextMenu` (opens the page's context menu below the caret, as Shift+F10 does)…) |
-| `engine.commands` | — | every command: id, label, location, shortcut, params, enabled |
+| `engine.commands` | ; | every command: id, label, location, shortcut, params, enabled |
 | `document.inspect` | `text?` | blocks (text, style, runs, lists, tables), parts, sections, selection, pages |
-| `ui.inspect` | — | UI state, view, dialog, window size, page rects on screen, caret, comment balloons (`balloons`: id + screen rect; `balloon`: the selected one), perf |
+| `ui.inspect` | ; | UI state, view, dialog, window size, page rects on screen, caret, comment balloons (`balloons`: id + screen rect; `balloon`: the selected one), perf |
 | `ui.click` | `x`, `y`, `button?`, `count?`, `shift?`, `cmd?`, `alt?` | real pointer input at window coordinates |
 | `ui.clickText` | `page` (0-based), `x`, `y` (points from the page's top-left), `count?` | click inside a page |
 | `ui.move` / `ui.drag` | `x`,`y` / `x`,`y`,`toX`,`toY`,`steps?` | pointer move / drag |
@@ -63,10 +63,10 @@ and set `WORDCRAFT_CONTROL_KEY` to that app's key.
 | `ui.text` | `text` | typed text through egui |
 | `ui.screenshot` | `path?` | PNG of the window: written to `path`, or without one returned as base64 `png` in the reply |
 | `ui.render` | `path?`, `page?` (1-based), `scale?` | PNG of a page, rendered by the engine: written to `path`, or without one returned as base64 `png` in the reply (never a fixed name in the shared temporary folder) |
-| `ui.parity` | — | feature-catalog parity |
+| `ui.parity` | ; | feature-catalog parity |
 | `ui.resize` / `ui.focus` / `app.quit` | | window control |
 | `agent.listen` | `timeoutMs?`, `agent?` | Ask Agent: the next request from the window, or `{none: true}` (see [Ask Agent](#ask-agent)) |
-| `agent.reply` | `id`, `text`, `done?` | Ask Agent: show the agent's answer in the window |
+| `agent.reply` | `id`, `text`, `done?`, `comment?` | Ask Agent: show the agent's answer in the window; `comment` is anchored on the changed text |
 
 Any other method name is treated as a command id: `{"method": "format.bold"}` works.
 
@@ -111,7 +111,7 @@ WordCraft calls no model and holds no key: the agent is whatever the person conn
 | Method | Params | Result |
 |---|---|---|
 | `agent.listen` | `timeoutMs?` (default 30000, at most 60000), `agent?` (the agent's name) | the oldest waiting request, `{id, instruction, action, apply, selection: {text, anchor, focus, truncated}, document: {title, saved, language}, review}`, or `{none: true}` when none came in time |
-| `agent.reply` | `id`, `text`, `done?` (default true) | `{id, shown: true, done}`, or `{id, cancelled: true}` when the person cancelled the request |
+| `agent.reply` | `id`, `text`, `done?` (default true), `comment?` (with `done: true`) | `{id, shown: true, done, comment?}`, or `{id, cancelled: true}` when the person cancelled the request |
 
 - Both need the key, like every other method. They are answered on the connection's own thread
   from the window's queue, so an agent waiting in `agent.listen` holds up neither the window nor
@@ -149,13 +149,53 @@ WordCraft calls no model and holds no key: the agent is whatever the person conn
   selecting still work). `review: "trackedChanges"` in the request says so. The MCP bridge adds
   `request` to its calls by itself while a request it took is open, and `agent` from the MCP
   client's name.
+- **Several agents on one document.** Each agent goes by its own name (`agent.listen {agent}`;
+  the MCP bridge sends its client's name, or `--agent NAME`), and its tracked changes and comments
+  are signed `Agent (<name>)`. An agent has one colour, worked out from its name alone, so it is
+  the same in every document and on every surface: its tracked changes, its balloons, the request
+  list and its range on the page. Review › Show Markup › Specific People (`review.reviewers`)
+  shows or hides each reviewer's marks, people and agents alike; `review.acceptAll` and
+  `review.rejectAll` take `{author}` (one reviewer's changes) or `{shown: true}` (Accept / Reject
+  All Changes Shown).
+- **Held text.** From the moment the person sends a request, the window follows its selection
+  through every edit (a range lock in the engine, `crates/engine/src/locks.rs`). While an agent
+  works on the request, that text is held for it: a command another agent runs (`engine.execute`
+  with another request, or with `agent: <name>` outside any request; the bridge adds it) that
+  changes text inside it is refused, the document unchanged, with an error naming the holder
+  (`text.insert refused: Agent (alpha) is working on this text…`).
+  Text written right at the edge of a held range isn't inside it. The person is never refused, and
+  can release the range (`ui.askAgent {"release": id}`, Release in the request list) or cancel the
+  request. Inside a table the range is held as the whole table.
+- **Closing comment.** `agent.reply {id, text, comment}` (with `done: true`) anchors `comment` as a
+  comment of the document on the request's text as it is then, which covers what the agent
+  changed, by `Agent (<name>)`; the reply's `comment` gives its id (`{id: n}`), or `"pending"` when
+  the window didn't answer within 10 s (it anchors it on its next frame). A comment with a progress
+  note (`done: false`) is refused. The comment is at most 2,000 characters; the person's selection,
+  name and Comments pane are left as they were. Without a successful edit for this request,
+  the reply stays in the request list and the document receives no comment (`{id: null}`).
+  Request edits outside the requested range are refused, so the comment cannot describe a change
+  elsewhere while pointing at the original selection.
+Closing comments for table selections are explicitly refused: whole-table locks protect
+other agents, but cell-level anchor tracking is still design work. The answer stays visible
+in the request list. Story-block locks do not cover indirect changes through document-wide
+styles or metadata; a policy for these commands remains design work.
+
+- **Integration with proposal review (stage c).** This branch remains based on the quick-actions
+  stage; proposal review is integrated separately. When a request carries a `proposal`, agent
+  document modifications must remain refused, including `review.newComment`. Keep the closing
+  comment with the proposal and have the app anchor it only after Accept applies an effective
+  change, under the agent's author. Discard adds no document comment. Connecting the comment to
+  the proposal's revision group and showing its identity, scope and review state in the bubble
+  are integration design, not implemented by this branch.
 - `ui.askAgent` (a UI command, through `engine.execute`): no params opens the bubble at the
   selection (an error, with the reason, when no agent listens); `{"instruction": "…"}` queues a
   request without the bubble; `{"action": "shorten"}` sends a quick action; `{"cancel": id}`
-  cancels one; `{"close": true}` closes the bubble. `ui.inspect` reports `askAgent`: `{available,
-  reason, agentListening, bubble, history, requests: [{id, state:
-  "waiting"|"working"|"answered"|"cancelled", action, apply, instruction, agent, reply}], actions:
-  [{id, label, menu, apply}]}`.
+  cancels one; `{"close": true}` closes the bubble; `{"release": id}` lets other agents change a
+  request's text; `{"goTo": id}` selects the text a request covers now; `{"anchorComment": id}`
+  anchors an answered request's closing comment at once. `ui.inspect` reports `askAgent`:
+  `{available, reason, agentListening, bubble, history, requests: [{id, state:
+  "waiting"|"working"|"answered"|"cancelled", action, apply, instruction, agent, reply, author,
+  color, range: {start, end, heldBy}, comment}], actions: [{id, label, menu, apply}]}`.
 
 `wordcraft-cli mcp --connect` turns these into the tools `wait_for_request` and
 `reply_to_request` ([MCP server](mcp.md#ask-agent)).

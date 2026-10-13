@@ -163,6 +163,10 @@ pub struct ViewState {
     /// Review › Hide Ink: ink strokes aren't shown on screen (they stay in the document).
     #[serde(default)]
     pub hide_ink: bool,
+    /// Review › Show Markup › Specific People: the reviewers whose tracked changes aren't shown
+    /// (`review.reviewers`). A view setting, as in Word: never part of the document.
+    #[serde(skip)]
+    pub hidden_reviewers: Vec<String>,
     /// Draw tab: the tool dragging on the page uses, and each pen's colour and thickness.
     #[serde(default)]
     pub draw: crate::cmd::draw::DrawState,
@@ -232,6 +236,7 @@ impl Default for ViewState {
             proofing: true,
             numeral: NumeralMode::default(),
             hide_ink: false,
+            hidden_reviewers: Vec::new(),
             draw: Default::default(),
             field_codes: false,
             hide_white_space: false,
@@ -286,23 +291,18 @@ struct Undo {
 /// open typing group, a pending [`Session::join_next_undo`] and the dirty flag. See
 /// [`Session::edit_snapshot`].
 pub struct EditSnapshot {
+    document_id: u64,
+    locks: crate::locks::Locks,
     doc: Document,
     sel: Selection,
-    history_len: usize,
+    history: Vec<Arc<Undo>>,
     /// `Session::undo_evicted` when the snapshot was taken.
     evicted: u64,
-    /// The oldest undo steps, kept only when the stack is near its limit (the commands that
-    /// follow may push them out); at most [`SNAPSHOT_HEAD`].
-    head: Vec<Arc<Undo>>,
     redo: Vec<Arc<Undo>>,
     typing_open: bool,
     join_next: bool,
     dirty: bool,
 }
-
-/// Undo steps that the commands run between [`Session::edit_snapshot`] and [`Session::restore`]
-/// may push out of a full stack and still come back.
-const SNAPSHOT_HEAD: usize = 4;
 
 impl EditSnapshot {
     /// The document when the snapshot was taken.
@@ -315,7 +315,7 @@ impl EditSnapshot {
     }
     /// The number of undo steps then.
     pub fn undo_depth(&self) -> usize {
-        self.history_len
+        self.history.len()
     }
 }
 
@@ -353,6 +353,16 @@ pub struct Session {
     /// so its edits arrive as revisions to accept or reject. Not part of the document, so Undo
     /// and Redo never turn the person's setting on.
     pub force_tracking: bool,
+    /// Who runs the commands right now when it isn't the person: an agent's author name
+    /// (`Agent (<name>)`), set around its commands like `author`. Range locks held by someone
+    /// else refuse its edits ([`crate::locks`]); `None`, the person, is never refused.
+    pub editor: Option<String>,
+    /// Ranges held while an agent works on them for the person (Ask Agent), followed through
+    /// every edit ([`crate::locks`]). Not part of the document.
+    pub locks: crate::locks::Locks,
+    /// Nesting depth of [`Session::run`] (commands run commands): locks are checked and moved
+    /// once, around the outermost command.
+    run_depth: u32,
     /// Initials for comments (File › Options › General); empty = the name's initials.
     pub initials: String,
     /// Format painter: copied formatting waiting to be applied (and whether it stays on).
@@ -586,6 +596,9 @@ impl Session {
             registry: Arc::new(crate::cmd::registry()),
             author: "WordCraft User".into(),
             force_tracking: false,
+            editor: None,
+            locks: Default::default(),
+            run_depth: 0,
             initials: String::new(),
             painter: None,
             status: String::new(),
@@ -768,6 +781,8 @@ impl Session {
             field_codes: self.view.field_codes,
             outline: outline.clone(),
             proof: wordcraft_layout::ProofOptions { grammar: self.prefs.mark_grammar, spelling: self.prefs.spelling() },
+            // Changing them lays the document out again (`review.reviewers` calls `relayout`).
+            hidden_reviewers: if self.view.show_markup { self.view.hidden_reviewers.clone() } else { Vec::new() },
         };
         let l = Arc::new(wordcraft_layout::layout(&self.doc, &mut self.cache, &opts));
         self.layout = Some((self.rev, width, height, mode, spacing, l.clone(), self.view.proofing, outline, deleted, self.view.numeral));
@@ -984,16 +999,14 @@ impl Session {
     /// A snapshot to put back with [`Session::restore`], for a caller that runs a command and
     /// may want to take it back without a trace (cheap: the document's blocks are shared).
     ///
-    /// Covered: `doc`, `sel`, the undo stack (its length, and its oldest steps when it is near
-    /// the limit), `redo`, the open typing group, a pending `join_next_undo` and `dirty`. `rev`,
+    /// Covered: `doc`, `sel`, the undo stack (shared steps, including ones an Undo removes),
+    /// followed ranges, `redo`, the open typing group, a pending `join_next_undo` and `dirty`. `rev`,
     /// `cache` and `layout` are derived (`restore` bumps `rev`). The other fields are not
     /// covered: a caller that lets the command change them (the view, the find state, the
     /// clipboard, macros, the file path…) saves and puts them back itself.
     ///
-    /// `restore` is exact when the commands in between only add undo steps (every mutating
-    /// command adds at most one; up to [`SNAPSHOT_HEAD`] may push old steps out of a full
-    /// stack). Taking steps off the stack (`edit.undo`) or clearing it (`file.new`,
-    /// `file.open`) in between is not covered.
+    /// The complete undo/redo vectors are covered, including commands that remove or clear
+    /// steps. Steps and document blocks are shared, so this copies only their Arc pointers.
     ///
     /// The destructuring lists every field, so a new field does not build until someone decides
     /// whether a snapshot must cover it.
@@ -1019,6 +1032,10 @@ impl Session {
             author: _,
             // Like `author`: who is editing, not the document or its history.
             force_tracking: _,
+            editor: _,
+            // Range positions roll back with the document for caller-level cancellation.
+            locks,
+            run_depth: _,
             initials: _,
             painter: _,
             status: _,
@@ -1064,13 +1081,13 @@ impl Session {
             edit_marks: _,
             go_back_step: _,
         } = self;
-        let head = if history.len() + SNAPSHOT_HEAD > MAX_UNDO { history.iter().take(SNAPSHOT_HEAD).cloned().collect() } else { Vec::new() };
         EditSnapshot {
+            document_id: self.document_id,
+            locks: locks.clone(),
             doc: doc.clone(),
             sel: sel.clone(),
-            history_len: history.len(),
+            history: history.clone(),
             evicted: *undo_evicted,
-            head,
             redo: redo.clone(),
             typing_open: *typing_open,
             join_next: *join_next,
@@ -1082,17 +1099,14 @@ impl Session {
     /// selection or undo/redo (undo steps the limit pushed out meanwhile come back). The layout
     /// is recomputed.
     pub fn restore(&mut self, snap: EditSnapshot) {
-        let EditSnapshot { doc, sel, history_len, evicted, head, redo, typing_open, join_next, dirty } = snap;
-        let gone = usize::try_from(self.undo_evicted.saturating_sub(evicted)).unwrap_or(usize::MAX);
-        if gone > 0 {
-            let back = gone.min(head.len());
-            self.history.splice(0..0, head.into_iter().take(back));
-        }
+        let EditSnapshot { doc, sel, history, evicted, redo, typing_open, join_next, dirty, locks, document_id } = snap;
+        self.locks = locks;
+        self.document_id = document_id;
         self.undo_evicted = evicted;
         self.doc = doc;
         self.sel = sel;
         self.also_selected.clear();
-        self.history.truncate(history_len);
+        self.history = history;
         self.redo = redo;
         self.typing_open = typing_open;
         self.join_next = join_next;
@@ -1131,6 +1145,12 @@ impl Session {
         if let Some(why) = (spec.enabled)(self) {
             return Err(CmdError::Disabled(format!("{id}: {why}")));
         }
+        // Reject document replacement before it can change paths, dirty state or history.
+        if self.editor.is_some() && !self.locks.is_empty() && crate::locks::replaces_document(id) {
+            return Err(CmdError::Disabled(format!(
+                "{id} was not run: an agent cannot replace the document while Ask Agent requests hold text; finish the requests first"
+            )));
+        }
         // Restrict Editing: refused outright, or allowed as long as it only edits the exceptions.
         let guard = if spec.mutates { crate::cmd::protect::check_before(self, id, params)? } else { false };
         if spec.mutates && self.doc.settings.protection.as_deref() == Some("trackedChanges") {
@@ -1163,7 +1183,8 @@ impl Session {
         }
         // The undo stacks are snapshotted whole, not as a length: commands run nested commands,
         // whose checkpoints, undos and redos (and evictions at the limit) must be put back too.
-        let before_doc = if spec.mutates {
+        let changes_document = spec.mutates || matches!(id, "edit.undo" | "edit.undoTo" | "edit.redo") || crate::locks::replaces_document(id);
+        let before_doc = if changes_document {
             Some((
                 self.doc.clone(),
                 self.sel.clone(),
@@ -1172,6 +1193,8 @@ impl Session {
                 self.typing_open,
                 self.undo_evicted,
                 self.column.clone(),
+                self.locks.clone(),
+                self.document_id,
             ))
         } else {
             None
@@ -1198,7 +1221,12 @@ impl Session {
         let sel_before = self.sel.clone();
         let run = spec.run;
         let mutates = spec.mutates;
+        // Range locks: the stories that hold one, as they are before the outermost command (their
+        // blocks are shared, so this copies pointers). Undo and Redo count: they change the text too.
+        let held = if self.run_depth == 0 && !self.locks.is_empty() { Some(crate::locks::held_stories(self)) } else { None };
+        self.run_depth = self.run_depth.saturating_add(1);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::cmd::column::dispatch(self, id, mutates, run, params)));
+        self.run_depth = self.run_depth.saturating_sub(1);
         let mut result = match result {
             Ok(r) => r,
             Err(p) => {
@@ -1213,6 +1241,14 @@ impl Session {
             && !crate::cmd::protect::outside_unchanged(before, &self.doc, &self.author)
         {
             result = Err(CmdError::Disabled(format!("{id}: only the editable regions of this protected document can change")));
+        }
+        // Range locks (Ask Agent): an edit inside a range someone else holds is refused; otherwise
+        // the ranges follow the edit. Once, for the outermost command.
+        if result.is_ok()
+            && let Some(held) = &held
+            && let Err(e) = crate::locks::after_command(self, held, id, changes_document)
+        {
+            result = Err(e);
         }
         match &result {
             Ok(_) => {
@@ -1246,7 +1282,9 @@ impl Session {
                 }
             }
             Err(e) => {
-                if let Some((d, s, h, r, t, ev, c)) = before_doc {
+                if let Some((d, s, h, r, t, ev, c, locks, document_id)) = before_doc {
+                    self.locks = locks;
+                    self.document_id = document_id;
                     self.doc = d;
                     self.sel = s;
                     self.history = h;

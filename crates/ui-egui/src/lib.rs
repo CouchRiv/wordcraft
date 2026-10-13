@@ -23,6 +23,7 @@ macro_rules! tl {
 pub mod a11y;
 pub mod a11y_pane;
 pub mod agent_actions;
+pub mod agent_queue;
 pub mod ask_agent;
 pub mod backstage;
 pub mod canvas;
@@ -1377,6 +1378,8 @@ impl WordApp {
             self.ctx = Some(ctx.clone());
         }
         self.poll_printing(ctx);
+        // Ask Agent: requests' ranges and closing comments follow the queue.
+        agent_queue::sync(self);
         self.drain_control(ctx);
         zotero::poll(self, ctx);
         read_aloud::poll(self, ctx);
