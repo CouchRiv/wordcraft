@@ -27,8 +27,11 @@ USAGE:
                                               who tracked changes and comments are by)
   wordcraft-cli commands [--json]             list every command
   wordcraft-cli parity [--markdown]           feature-catalog parity
-  wordcraft-cli mcp [--connect HOST:PORT | --author NAME] [--automation-read-root DIR] [--automation-write-root DIR]
+  wordcraft-cli mcp [--connect HOST:PORT [--channel] | --author NAME] [--automation-read-root DIR] [--automation-write-root DIR]
                                               MCP server on stdio (headless, or bridged to the app).
+                                              --channel (with --connect): also push Ask Agent requests
+                                              as experimental claude/channel events, for clients that
+                                              show them; wait_for_request works without it.
                                               --automation-read-root / --automation-write-root confine
                                               the files the agent's commands read (open, insert text
                                               or picture, mail-merge data, templates…) and write (save,
@@ -119,7 +122,11 @@ const RUN_OPTIONS: &[OptionSpec] = &[
 ];
 const COMMANDS_OPTIONS: &[OptionSpec] = &[OptionSpec { name: "--json", takes_value: false }];
 const PARITY_OPTIONS: &[OptionSpec] = &[OptionSpec { name: "--markdown", takes_value: false }];
-const MCP_OPTIONS: &[OptionSpec] = &[OptionSpec { name: "--connect", takes_value: true }, OptionSpec { name: "--author", takes_value: true }];
+const MCP_OPTIONS: &[OptionSpec] = &[
+    OptionSpec { name: "--connect", takes_value: true },
+    OptionSpec { name: "--author", takes_value: true },
+    OptionSpec { name: "--channel", takes_value: false },
+];
 const ZOTERO_OPTIONS: &[OptionSpec] = &[
     OptionSpec { name: "--cmd", takes_value: true },
     OptionSpec { name: "--save", takes_value: true },
@@ -297,13 +304,17 @@ fn run(args: &[String]) -> Result<(), Failure> {
             validate_options("mcp", &rest, MCP_OPTIONS)?;
             let author = arg_value(&rest, "--author");
             let connect = arg_value(&rest, "--connect");
+            let channel = rest.iter().any(|a| a == "--channel");
+            if channel && connect.is_none() {
+                return Err("mcp: --channel pushes the app's Ask Agent requests, so it needs --connect HOST:PORT".into());
+            }
             if roots.is_some() && connect.is_some() {
                 return Err(
                     "mcp: --automation-read-root and --automation-write-root confine the headless server; a running app is not confined by them"
                         .into(),
                 );
             }
-            let backend: Box<dyn wordcraft_mcp::Backend> = match connect {
+            let backend: Box<dyn wordcraft_mcp::Backend> = match connect.clone() {
                 // The app's user name is the person's own setting; don't rewrite it from a flag.
                 Some(_) if author.is_some() => {
                     return Err("mcp: --author applies to the headless server; with --connect, run file.setAuthor".into());
@@ -331,9 +342,17 @@ fn run(args: &[String]) -> Result<(), Failure> {
                 }
             };
             let mut server = wordcraft_mcp::Server::new(backend);
+            let out = wordcraft_mcp::channel::SharedWriter::new(std::io::stdout());
+            if let (true, Some(addr)) = (channel, connect.as_deref()) {
+                // Its own connection, so tool calls are answered while it waits for requests.
+                let listener = wordcraft_mcp::Remote::connect(addr).map_err(|e| format!("can't reach the WordCraft app at {addr}: {e}"))?;
+                let ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                server = server.with_channel(ready.clone());
+                wordcraft_mcp::channel::spawn(Box::new(listener), out.clone(), ready);
+            }
             let stdin = std::io::stdin();
             // A client that closes our stdout has hung up: `serve` returns BrokenPipe and we end cleanly.
-            Ok(server.serve(stdin.lock(), std::io::stdout())?)
+            Ok(server.serve(stdin.lock(), out)?)
         }
         "zotero" => {
             validate_options("zotero", &rest, ZOTERO_OPTIONS)?;

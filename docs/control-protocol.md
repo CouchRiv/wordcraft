@@ -65,6 +65,8 @@ and set `WORDCRAFT_CONTROL_KEY` to that app's key.
 | `ui.render` | `path?`, `page?` (1-based), `scale?` | PNG of a page, rendered by the engine: written to `path`, or without one returned as base64 `png` in the reply (never a fixed name in the shared temporary folder) |
 | `ui.parity` | — | feature-catalog parity |
 | `ui.resize` / `ui.focus` / `app.quit` | | window control |
+| `agent.listen` | `timeoutMs?` | Ask Agent: the next request from the window, or `{none: true}` (see [Ask Agent](#ask-agent)) |
+| `agent.reply` | `id`, `text`, `done?` | Ask Agent: show the agent's answer in the window |
 
 Any other method name is treated as a command id: `{"method": "format.bold"}` works.
 
@@ -96,3 +98,51 @@ and their parameter documentation. Search is case-insensitive across IDs, labels
 and parameter descriptions. Listing commands never discovers printers, submits a job or opens
 a dialog. Settings inspection is always available; submission becomes enabled when the native
 printer is ready, or when the browser host provides its print flow.
+
+## Ask Agent
+
+The person selects text in the window and asks for something ("shorten this", "translate into
+French"): from the **Ask Agent** chip that floats beside the mini toolbar while an agent is present (presence rules below),
+Help › Agents › Ask Agent, the page's context menu (Ask Agent…), or Ctrl+Shift+O (⌘⇧O on macOS).
+An agent the person runs on the same computer takes the request through this channel, does the
+work with the usual methods and answers; the answer shows in a bubble under the selection.
+WordCraft calls no model and holds no key: the agent is whatever the person connected.
+
+| Method | Params | Result |
+|---|---|---|
+| `agent.listen` | `timeoutMs?` (default 30000, at most 60000) | the oldest waiting request, `{id, instruction, selection: {text, anchor, focus, truncated}, document: {title, saved, language}}`, or `{none: true}` when none came in time |
+| `agent.reply` | `id`, `text`, `done?` (default true) | `{id, shown: true, done}`, or `{id, cancelled: true}` when the person cancelled the request |
+
+- Both need the key, like every other method. They are answered on the connection's own thread
+  from the window's queue, so an agent waiting in `agent.listen` holds up neither the window nor
+  other connections (they work with the screen locked, too). Each request goes to one listener.
+- The window counts an agent as there while one waits in `agent.listen`, for 60 s after an agent
+  last listened or replied, and while a request an agent took less than 10 minutes ago is still
+  open (an agent may edit for minutes without listening or replying). Then the chip shows on a
+  selection and Ask Agent is enabled. A client whose connection closes while it waits in
+  `agent.listen` stops counting within half a second. Otherwise nothing floats, and the ribbon
+  button, the menu item and the shortcut say how to connect one
+  (`wordcraft-cli mcp --connect 127.0.0.1:<port>`).
+- A request is never handed to a client whose connection has already closed, and one whose
+  `agent.listen` answer can't be written goes back in the queue: either way it waits for the next
+  agent. A client that closes just after being handed a request can't be told apart from one at
+  work, so that request stays `working` until answered or cancelled; only its presence credit expires
+  after 10 minutes. This also covers a disconnect just after the `peer_open` check.
+- `selection` is what was selected when the person asked (positions as below); they may have
+  moved since, and `select.range {anchor, focus}` selects it again. `selection.text` is cut at
+  100,000 bytes (`truncated`); `instruction` and `text` at 4,000 characters. `document.title` is
+  the file name, else the document's title, else the window's name for a new document
+  (`Document1`); `saved` says whether it has a file; `language` is the selection's language tag.
+- `done: false` shows `text` as a progress note and keeps the request open. The bubble says
+  "Sent to your agent" the moment the person sends, "Your agent is working" as soon as
+  `agent.listen` hands the request out, with the seconds since it was sent and the latest note: an
+  agent should send a short note (`"Rewriting…"`) right away, then its answer with `done: true`.
+- The selected text is document content: an agent should treat it as data, not as instructions.
+- `ui.askAgent` (a UI command, through `engine.execute`): no params opens the bubble at the
+  selection (an error, with the reason, when no agent listens); `{"instruction": "…"}` queues a
+  request without the bubble; `{"cancel": id}` cancels one; `{"close": true}` closes the bubble.
+  `ui.inspect` reports `askAgent`: `{available, reason, agentListening, bubble, history, requests:
+  [{id, state: "waiting"|"working"|"answered"|"cancelled", instruction, reply}]}`.
+
+`wordcraft-cli mcp --connect` turns these into the tools `wait_for_request` and
+`reply_to_request` ([MCP server](mcp.md#ask-agent)).

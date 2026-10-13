@@ -106,11 +106,13 @@ pub fn combo(m: Modifiers, key: &str, with_shift: bool) -> String {
 
 /// Shortcuts for interface commands (`ui.*`), which aren't in the engine's keymap: Alt+Q moves
 /// to "Tell me" command search, as in Word for Windows (#819). Not on macOS, where Option+Q types
-/// a character.
+/// a character. Ctrl+Shift+O (⌘⇧O) is Ask Agent… ([`crate::ask_agent::SHORTCUT`]), not among
+/// Word's published shortcuts.
 fn ui_shortcut(key: Key, m: Modifiers) -> Option<(&'static str, Value)> {
     let alt_only = m.alt && !m.command && !m.ctrl && !m.mac_cmd && !m.shift;
     match key {
         Key::Q if alt_only && !cfg!(target_os = "macos") => Some(("ui.dialog", json!({"name": "commands"}))),
+        Key::O if m.command && m.shift && !m.alt => Some(("ui.askAgent", json!({}))),
         _ => None,
     }
 }
@@ -228,6 +230,16 @@ pub fn canvas_events(app: &mut WordApp, ctx: &egui::Context) {
             }
         }
         return;
+    }
+    // Typing in the document puts away an Ask Agent bubble that has sent its request.
+    let typed = |e: &egui::Event| match e {
+        egui::Event::Text(t) => !t.is_empty(),
+        egui::Event::Paste(_) | egui::Event::Ime(egui::ImeEvent::Commit(_)) => true,
+        egui::Event::Key { key: Key::Backspace | Key::Delete | Key::Enter, pressed: true, modifiers, .. } => !modifiers.command,
+        _ => false,
+    };
+    if events.iter().any(typed) {
+        crate::ask_agent::typing_resumed(app);
     }
     for e in events {
         // An Alt shortcut (Alt+Shift+D, Alt+F7…) may also send its key's text; it isn't typed.

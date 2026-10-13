@@ -1,6 +1,8 @@
 //! JSON-RPC 2.0 framing and the MCP lifecycle / tools / resources methods.
 
 use std::io::{BufRead, Write};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{Value, json};
 
@@ -22,7 +24,10 @@ const INSTRUCTIONS: &str = "WordCraft is a word processor (a Microsoft Word clon
 parameters with list_commands and run them with execute (or several with batch). Positions are \
 {story:\"body\", path:[block,(row,cell,block)...], off:byteOffset}. Typical flow: new_document → type_text \
 \"Hello\" → execute text.newParagraph → execute para.style {style:\"Heading 1\"} → select_text {text:\"Hello\"} → \
-execute format.bold → inspect_document to verify → render_page to look at the result → save {path:\"out.docx\"}.";
+execute format.bold → inspect_document to verify → render_page to look at the result → save {path:\"out.docx\"}. \
+Ask Agent: when connected to the app, wait_for_request returns what the person asks from the WordCraft window \
+(an instruction about their selection); send a short progress note with reply_to_request (done: false) at once, do it, \
+then answer with reply_to_request.";
 
 /// Resource URIs.
 pub const DOC_URI: &str = "wordcraft://document";
@@ -32,6 +37,8 @@ pub const COMMANDS_URI: &str = "wordcraft://commands";
 pub struct Server {
     backend: Box<dyn Backend>,
     initialized: bool,
+    /// `--channel`: set once the client is ready for channel events ([`crate::channel`]).
+    channel: Option<Arc<AtomicBool>>,
 }
 
 fn response(id: Value, result: Value) -> Value {
@@ -44,7 +51,15 @@ fn error(id: Value, code: i64, message: impl Into<String>) -> Value {
 
 impl Server {
     pub fn new(backend: Box<dyn Backend>) -> Self {
-        Self { backend, initialized: false }
+        Self { backend, initialized: false, channel: None }
+    }
+
+    /// Declare the experimental `claude/channel` capability: Ask Agent requests are pushed as
+    /// channel events by [`crate::channel::spawn`], which starts once `ready` is set (when the
+    /// client sends `notifications/initialized`).
+    pub fn with_channel(mut self, ready: Arc<AtomicBool>) -> Self {
+        self.channel = Some(ready);
+        self
     }
 
     pub fn backend(&mut self) -> &mut dyn Backend {
@@ -61,9 +76,11 @@ impl Server {
     pub fn serve(&mut self, input: impl BufRead, mut output: impl Write) -> std::io::Result<()> {
         for line in input.lines() {
             let line = line?;
-            if let Some(reply) = self.handle_line(&line) {
+            if let Some(mut reply) = self.handle_line(&line) {
+                // One write per message, so channel events written from another thread never
+                // land inside it (`channel::SharedWriter`).
+                reply.push('\n');
                 output.write_all(reply.as_bytes())?;
-                output.write_all(b"\n")?;
                 output.flush()?;
             }
         }
@@ -119,7 +136,12 @@ impl Server {
 
     fn notification(&mut self, method: &str) {
         match method {
-            "notifications/initialized" => self.initialized = true,
+            "notifications/initialized" => {
+                self.initialized = true;
+                if let Some(ready) = &self.channel {
+                    ready.store(true, Ordering::SeqCst);
+                }
+            }
             "notifications/cancelled" | "notifications/progress" | "notifications/roots/list_changed" => {}
             other => log::debug!("ignoring notification {other}"),
         }
@@ -130,12 +152,18 @@ impl Server {
             "initialize" => {
                 let asked = params.get("protocolVersion").and_then(Value::as_str).unwrap_or(PROTOCOL_VERSION);
                 let version = if SUPPORTED_VERSIONS.contains(&asked) { asked } else { PROTOCOL_VERSION };
+                let mut capabilities = json!({"tools": {}, "resources": {}});
+                let mut channel = "";
+                if self.channel.is_some() {
+                    capabilities["experimental"] = json!({"claude/channel": {}});
+                    channel = crate::channel::INSTRUCTIONS;
+                }
                 Ok(json!({
                     "protocolVersion": version,
-                    "capabilities": {"tools": {}, "resources": {}},
+                    "capabilities": capabilities,
                     "serverInfo": {"name": "wordcraft", "title": "WordCraft", "version": env!("CARGO_PKG_VERSION"), "websiteUrl": "https://getartcraft.com/apps/wordcraft"},
                     "instructions": format!(
-                        "{INSTRUCTIONS} Backend: {}. Community: https://discord.gg/artcraft · https://getartcraft.com/apps/wordcraft · https://github.com/storytold/wordcraft",
+                        "{INSTRUCTIONS}{channel} Backend: {}. Community: https://discord.gg/artcraft · https://getartcraft.com/apps/wordcraft · https://github.com/storytold/wordcraft",
                         self.backend.describe()
                     ),
                 }))

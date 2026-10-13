@@ -11,6 +11,8 @@
 //! - `ui.screenshot {path?}`: PNG of the window; `ui.render {path?, page?, scale?}`: page PNG
 //!   (without `path`, both reply with the PNG as base64 `png`)
 //! - `ui.parity`: feature catalog parity
+//! - `agent.listen`, `agent.reply` (Ask Agent) never reach this thread: the host's transport answers
+//!   them from the shared [`crate::AgentHub`], so a waiting agent never holds up the window
 
 use std::sync::mpsc::Sender;
 
@@ -60,6 +62,7 @@ pub fn inspect(app: &mut WordApp, ctx: &egui::Context) -> Value {
         "focused": app.canvas.focused,
         "title": app.title_stem(),
         "dirty": app.session.dirty,
+        "askAgent": app.ask_agent.inspect(),
         "perf": {"frameMs": app.frame_ms, "renderMs": app.canvas.render_ms, "layoutMs": app.session.layout().ms},
     })
 }
