@@ -2103,3 +2103,33 @@
 	Your agent is working…	Votre agent travaille…
 	{seconds} s	{seconds} s
 	Enter to send, Shift+Enter for a new line	Entrée pour envoyer, Maj+Entrée pour une nouvelle ligne
+# Ask Agent quick actions
+	Sent to {agent}…	Envoyé à {agent}…
+	{agent} is working…	{agent} travaille…
+	The agent's changes are tracked: accept or reject them on the Review tab.	Les modifications de l’agent sont suivies : acceptez-les ou refusez-les dans l’onglet Révision.
+	Inserts the result after the selection	Insère le résultat après la sélection
+	Answers in the bubble; changes nothing	Répond dans la bulle, ne modifie rien
+	Replaces the selection; the change is tracked	Remplace la sélection, la modification est suivie
+	Rewrite	Réécrire
+	Concise	Concis
+	Friendly	Chaleureux
+	Confident	Assuré
+	Shorten	Raccourcir
+	Fix spelling & grammar	Corriger l’orthographe et la grammaire
+	Simplify	Simplifier
+	English	Anglais
+	French	Français
+	Spanish	Espagnol
+	German	Allemand
+	Portuguese	Portugais
+	More	Plus
+	Bulletize	Mettre en liste à puces
+	Turn into table	Transformer en tableau
+	Summarize	Résumer
+	Continue writing	Poursuivre la rédaction
+	Explain	Expliquer
+	Action items	Actions à mener
+	Apply heading styles	Appliquer les styles de titre
+	Tidy formatting	Harmoniser la mise en forme
+	Check consistency	Vérifier la cohérence
+	Follows the instruction; any changes are tracked	Suit la consigne ; toute modification est suivie

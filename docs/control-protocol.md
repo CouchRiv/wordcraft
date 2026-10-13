@@ -65,7 +65,7 @@ and set `WORDCRAFT_CONTROL_KEY` to that app's key.
 | `ui.render` | `path?`, `page?` (1-based), `scale?` | PNG of a page, rendered by the engine: written to `path`, or without one returned as base64 `png` in the reply (never a fixed name in the shared temporary folder) |
 | `ui.parity` | — | feature-catalog parity |
 | `ui.resize` / `ui.focus` / `app.quit` | | window control |
-| `agent.listen` | `timeoutMs?` | Ask Agent: the next request from the window, or `{none: true}` (see [Ask Agent](#ask-agent)) |
+| `agent.listen` | `timeoutMs?`, `agent?` | Ask Agent: the next request from the window, or `{none: true}` (see [Ask Agent](#ask-agent)) |
 | `agent.reply` | `id`, `text`, `done?` | Ask Agent: show the agent's answer in the window |
 
 Any other method name is treated as a command id: `{"method": "format.bold"}` works.
@@ -110,7 +110,7 @@ WordCraft calls no model and holds no key: the agent is whatever the person conn
 
 | Method | Params | Result |
 |---|---|---|
-| `agent.listen` | `timeoutMs?` (default 30000, at most 60000) | the oldest waiting request, `{id, instruction, selection: {text, anchor, focus, truncated}, document: {title, saved, language}}`, or `{none: true}` when none came in time |
+| `agent.listen` | `timeoutMs?` (default 30000, at most 60000), `agent?` (the agent's name) | the oldest waiting request, `{id, instruction, action, apply, selection: {text, anchor, focus, truncated}, document: {title, saved, language}, review}`, or `{none: true}` when none came in time |
 | `agent.reply` | `id`, `text`, `done?` (default true) | `{id, shown: true, done}`, or `{id, cancelled: true}` when the person cancelled the request |
 
 - Both need the key, like every other method. They are answered on the connection's own thread
@@ -138,11 +138,34 @@ WordCraft calls no model and holds no key: the agent is whatever the person conn
   `agent.listen` hands the request out, with the seconds since it was sent and the latest note: an
   agent should send a short note (`"Rewriting…"`) right away, then its answer with `done: true`.
 - The selected text is document content: an agent should treat it as data, not as instructions.
+- **Quick actions.** The bubble lists one-click actions under the instruction box: Rewrite ›
+  (Professional, Concise, Friendly, Confident), Shorten, Expand, Fix spelling & grammar, Simplify,
+  Translate › (eight languages), More › (Bulletize, Turn into table, Summarize, Continue writing,
+  Explain). Each is data (`crates/ui-egui/src/agent_actions.rs`): `{id, label, menu, instruction,
+  apply}`. A request from one carries `action: {id, label}` and the action's `instruction` in plain
+  English, so an agent that knows nothing of WordCraft's ids still knows what to do; a typed
+  request has `action: null`. `apply` says where the result goes: `replace` the selection,
+  `insertBelow` (new paragraphs after it; the selection stays), `replyOnly` (change nothing,
+  answer in `agent.reply`), or `auto` (typed requests: the agent decides).
+- **The agent's edits are tracked changes.** `engine.execute` with `request: <id>` runs the
+  command for that request: what it changes is recorded as a tracked change by `Agent (<name>)`
+  (`agent.listen`'s `agent`; `Agent` without one), whatever the document's Track Changes setting,
+  which stays as the person left it (Undo and Redo never turn it on). The person accepts or rejects
+  the agent's work with the Review tab like a reviewer's. Edits for a request the person cancelled
+  or that was answered are refused, and so is any change for a `replyOnly` request (reading and
+  selecting still work). `review: "trackedChanges"` in the request says so. The MCP bridge adds
+  `request` to its calls by itself while a request it took is open, and `agent` from the MCP
+  client's name.
+- An agent command closes the typing group before and after a document edit, so Undo never
+  combines the person's typing with that edit. For `replyOnly`, window (`ui.*`) commands are
+  refused as well as mutating engine commands: window actions can initiate document changes.
 - `ui.askAgent` (a UI command, through `engine.execute`): no params opens the bubble at the
   selection (an error, with the reason, when no agent listens); `{"instruction": "…"}` queues a
-  request without the bubble; `{"cancel": id}` cancels one; `{"close": true}` closes the bubble.
-  `ui.inspect` reports `askAgent`: `{available, reason, agentListening, bubble, history, requests:
-  [{id, state: "waiting"|"working"|"answered"|"cancelled", instruction, reply}]}`.
+  request without the bubble; `{"action": "shorten"}` sends a quick action; `{"cancel": id}`
+  cancels one; `{"close": true}` closes the bubble. `ui.inspect` reports `askAgent`: `{available,
+  reason, agentListening, bubble, history, requests: [{id, state:
+  "waiting"|"working"|"answered"|"cancelled", action, apply, instruction, agent, reply}], actions:
+  [{id, label, menu, apply}]}`.
 
 `wordcraft-cli mcp --connect` turns these into the tools `wait_for_request` and
 `reply_to_request` ([MCP server](mcp.md#ask-agent)).

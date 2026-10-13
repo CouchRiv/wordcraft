@@ -1,7 +1,8 @@
 //! Programmatic control of the running app (agents, tests, MCP bridge).
 //!
 //! Methods (JSON lines over the host's transport, see `docs/control-protocol.md`):
-//! - `engine.execute {command, params}`: run any command (engine or `ui.*`)
+//! - `engine.execute {command, params, request?}`: run any command (engine or `ui.*`); with `request`
+//!   (an Ask Agent request id) as that request's agent, its edits tracked under the agent's name
 //! - `engine.commands {search?}`: engine and app print commands with enablement and parameters
 //! - `document.inspect`: document structure; `ui.inspect`: UI state, canvas geometry, perf
 //! - `ui.click {x, y, button?, count?, shift?, cmd?}`, `ui.move {x, y}`, `ui.drag {x, y, toX, toY}`:
@@ -115,7 +116,15 @@ pub fn handle(app: &mut WordApp, ctx: &egui::Context, req: &ControlRequest) -> O
         "engine.execute" | "command" => {
             let Some(id) = s("command").or(s("id")) else { return err("missing `command`") };
             let params = p.get("params").cloned().filter(|v| !v.is_null()).unwrap_or(json!({}));
-            match app.execute(id, params) {
+            // `request`: run for that Ask Agent request, as the agent's tracked change.
+            let r = match p.get("request") {
+                None | Some(Value::Null) => app.execute(id, params),
+                Some(r) => match r.as_u64() {
+                    Some(request) => crate::ask_agent::run_for(app, request, id, |app| app.execute(id, params)),
+                    None => Err("`request` is an Ask Agent request id".into()),
+                },
+            };
+            match r {
                 Ok(v) => ok(v),
                 Err(e) => err(e),
             }

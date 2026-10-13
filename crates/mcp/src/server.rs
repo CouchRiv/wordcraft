@@ -150,6 +150,10 @@ impl Server {
     fn request(&mut self, method: &str, params: &Value) -> Result<Value, (i64, String)> {
         match method {
             "initialize" => {
+                // The client's name names the agent in the app (Ask Agent's tracked changes).
+                if let Some(name) = params.pointer("/clientInfo/name").and_then(Value::as_str) {
+                    self.backend.set_client(name);
+                }
                 let asked = params.get("protocolVersion").and_then(Value::as_str).unwrap_or(PROTOCOL_VERSION);
                 let version = if SUPPORTED_VERSIONS.contains(&asked) { asked } else { PROTOCOL_VERSION };
                 let mut capabilities = json!({"tools": {}, "resources": {}});

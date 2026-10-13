@@ -245,7 +245,7 @@ pub fn merge_formatting(s: &Session, frag: &mut Fragment) {
 pub fn insert(s: &mut Session, mut frag: Fragment) -> Result<(), CmdError> {
     super::controls::prepare_edit(s)?;
     let at = delete_selection(s)?;
-    let track = s.doc.settings.track_changes;
+    let track = s.tracking();
     let mut rid = None;
     if track {
         // What the last command cut, pasted again: the two ends of a move.

@@ -222,7 +222,7 @@ fn delete(s: &mut Session, segs: &[(Pos, Pos)]) -> Result<(), CmdError> {
         if a == b || a.path != b.path || a.story != b.story {
             continue;
         }
-        if s.doc.settings.track_changes {
+        if s.tracking() {
             super::track_delete(s, &a, &b)?;
         } else {
             s.doc.delete_range(&a, &b)?;

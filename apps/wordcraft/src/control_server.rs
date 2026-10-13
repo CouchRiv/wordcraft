@@ -136,7 +136,7 @@ fn peer_open(s: &TcpStream) -> bool {
     }
 }
 
-/// `agent.listen {timeoutMs?}` and `agent.reply {id, text, done?}` (Ask Agent): the
+/// `agent.listen {timeoutMs?, agent?}` and `agent.reply {id, text, done?}` (Ask Agent): the
 /// reply line, and the request handed out (to put back if the reply can't be written).
 fn agent_method(agents: &AgentHub, method: &str, p: &Value, probe: &TcpStream) -> (Value, Option<u64>) {
     let err = |e: &str| json!({"ok": false, "error": e});
@@ -149,7 +149,8 @@ fn agent_method(agents: &AgentHub, method: &str, p: &Value, probe: &TcpStream) -
                     None => return (err("`timeoutMs` is a number of milliseconds (at most 60000)"), None),
                 },
             };
-            match agents.listen(Duration::from_millis(ms), || peer_open(probe)) {
+            let agent = p.get("agent").and_then(Value::as_str);
+            match agents.listen_as(Duration::from_millis(ms), agent, || peer_open(probe)) {
                 Some(r) => (json!({"ok": true, "result": r.to_json()}), Some(r.id)),
                 None => (json!({"ok": true, "result": {"none": true}}), None),
             }
@@ -721,5 +722,19 @@ mod tests {
         assert_eq!(agents.requests()[0].state, wordcraft_ui_egui::ask_agent::State::Waiting, "kept for the next agent");
         let mut next = authed(port);
         assert_eq!(next.call(r#"{"id":1,"method":"agent.listen","params":{"timeoutMs":1000}}"#)["result"]["id"], id);
+    }
+
+    #[test]
+    fn agent_listen_records_the_agents_name() {
+        let (port, _rx, agents) = boot_agents(FIRST_REQUEST);
+        let id = agents.ask("simplify", sel("Kilns"), json!({})).unwrap();
+        let mut c = authed(port);
+        let r = c.call(r#"{"id":1,"method":"agent.listen","params":{"timeoutMs":1000,"agent":"  editor\u0007 bot  "}}"#);
+        assert_eq!(r["result"]["id"], id, "{r}");
+        assert_eq!(r["result"]["apply"], "auto");
+        assert_eq!(r["result"]["review"], "trackedChanges");
+        let taken = agents.request(id).unwrap();
+        assert_eq!((taken.agent.as_deref(), taken.author()), (Some("editor bot"), "Agent (editor bot)".to_string()));
+        assert_eq!(agents.agent_name().as_deref(), Some("editor bot"));
     }
 }

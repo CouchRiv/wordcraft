@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use wordcraft_doc::Pos;
 
 use crate::WordApp;
+use crate::agent_actions::{AgentAction, Apply, MENUS};
 use crate::theme::Tokens;
 
 /// The shortcut, in the registry's notation (Ctrl+Shift+O; ⌘⇧O on macOS), free in WordCraft and
@@ -80,7 +81,12 @@ impl State {
 #[derive(Clone, Debug)]
 pub struct Request {
     pub id: u64,
+    /// What the agent is asked: the person's words, or a quick action's instruction.
     pub instruction: String,
+    /// The quick action it came from (`agent_actions`), if any.
+    pub action: Option<AgentAction>,
+    /// What to do with the result.
+    pub apply: Apply,
     /// `{text, anchor, focus, truncated}` as it was when the person asked. Shared, so the window
     /// copies none of it when it reads the requests.
     pub selection: Arc<Value>,
@@ -89,6 +95,10 @@ pub struct Request {
     pub state: State,
     /// The agent's latest text: its answer, or a progress note while it works.
     pub reply: String,
+    /// The agent that took it, as it named itself (`agent.listen {agent}`), cleaned up.
+    pub agent: Option<String>,
+    /// Whether a command for this request actually changed the document.
+    pub has_changes: bool,
     /// When an agent took it (`now_ms`).
     taken_ms: f64,
     /// When the person asked (`now_ms`), for the time shown while it runs.
@@ -98,8 +108,42 @@ pub struct Request {
 impl Request {
     /// What `agent.listen` hands the agent.
     pub fn to_json(&self) -> Value {
-        json!({"id": self.id, "instruction": self.instruction, "selection": &*self.selection, "document": self.document})
+        json!({
+            "id": self.id,
+            "instruction": self.instruction,
+            "action": self.action.as_ref().map(AgentAction::to_json),
+            "apply": self.apply.name(),
+            "selection": &*self.selection,
+            "document": self.document,
+            "review": "trackedChanges",
+        })
     }
+
+    /// The author of the agent's edits and comments for this request: `Agent (name)`.
+    pub fn author(&self) -> String {
+        match &self.agent {
+            Some(name) => format!("Agent ({name})"),
+            None => "Agent".into(),
+        }
+    }
+
+    /// What the window shows for it: the person's words, or the action's label (English; shown
+    /// through the catalog).
+    pub fn title(&self) -> &str {
+        self.action.as_ref().map_or(self.instruction.as_str(), |a| a.label.as_str())
+    }
+}
+
+/// Longest agent name kept, in characters.
+const MAX_AGENT_NAME: usize = 40;
+
+/// An agent's name as it gives it, cleaned for display and for tracked changes: control
+/// characters dropped, spaces folded, at most [`MAX_AGENT_NAME`] characters; `None` when nothing
+/// is left.
+pub fn clean_agent_name(name: &str) -> Option<String> {
+    let folded: String = name.split_whitespace().collect::<Vec<_>>().join(" ").chars().filter(|c| !c.is_control()).collect();
+    let name = cap_chars(folded.trim(), MAX_AGENT_NAME);
+    (!name.is_empty()).then_some(name)
 }
 
 #[derive(Default)]
@@ -110,6 +154,8 @@ struct Inner {
     listeners: usize,
     /// When an agent last listened or replied (`now_ms`); 0 = never.
     last_seen_ms: f64,
+    /// The name of the agent that last listened, when it gave one.
+    last_agent: Option<String>,
 }
 
 /// The Ask Agent queue, shared by the window and the control channel's connection threads.
@@ -143,26 +189,37 @@ impl AgentHub {
         }
     }
 
-    /// Queue a request; its id. An instruction that is empty once trimmed is refused.
+    /// Queue a typed request; its id. An instruction that is empty once trimmed is refused.
     pub fn ask(&self, instruction: &str, selection: Value, document: Value) -> Result<u64, String> {
-        let instruction = cap_chars(instruction.trim(), MAX_TEXT_CHARS);
+        self.ask_with(instruction, None, selection, document)
+    }
+
+    /// Queue a request, from a quick action when `action` is given (its instruction is sent).
+    pub fn ask_with(&self, instruction: &str, action: Option<&AgentAction>, selection: Value, document: Value) -> Result<u64, String> {
+        let instruction = cap_chars(action.map_or(instruction, |a| a.instruction.as_str()).trim(), MAX_TEXT_CHARS);
         if instruction.is_empty() {
             return Err("type an instruction for the agent first".into());
         }
+        let apply = action.map_or(Apply::Auto, |a| a.apply);
+        let request = Request {
+            id: 0,
+            instruction,
+            action: action.cloned(),
+            apply,
+            selection: Arc::new(selection),
+            document,
+            state: State::Waiting,
+            reply: String::new(),
+            agent: None,
+            has_changes: false,
+            taken_ms: 0.0,
+            asked_ms: crate::now_ms(),
+        };
         let id = {
             let mut s = self.lock();
             let id = s.next_id;
             s.next_id = s.next_id.saturating_add(1);
-            s.requests.push_back(Request {
-                id,
-                instruction,
-                selection: Arc::new(selection),
-                document,
-                state: State::Waiting,
-                reply: String::new(),
-                taken_ms: 0.0,
-                asked_ms: crate::now_ms(),
-            });
+            s.requests.push_back(Request { id, ..request });
             // Drop the oldest closed requests, then (only past twice the limit) the oldest.
             while s.requests.len() > KEEP {
                 match s.requests.iter().position(|r| !r.state.open()) {
@@ -209,6 +266,17 @@ impl AgentHub {
     /// control-channel connection thread.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn listen(&self, timeout: std::time::Duration, alive: impl Fn() -> bool) -> Option<Request> {
+        self.listen_as(timeout, None, alive)
+    }
+
+    /// [`AgentHub::listen`] for an agent that names itself (`agent.listen {agent}`): the
+    /// request records the name, and the agent's edits for it are tracked under it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn listen_as(&self, timeout: std::time::Duration, agent: Option<&str>, alive: impl Fn() -> bool) -> Option<Request> {
+        let agent = agent.and_then(clean_agent_name);
+        if agent.is_some() {
+            self.lock().last_agent = agent.clone();
+        }
         let deadline = std::time::Instant::now() + timeout.min(std::time::Duration::from_millis(MAX_LISTEN_MS));
         let mut s = self.lock();
         s.listeners = s.listeners.saturating_add(1);
@@ -228,6 +296,7 @@ impl AgentHub {
             if let Some(r) = s.requests.iter_mut().find(|r| r.state == State::Waiting) {
                 r.state = State::Working;
                 r.taken_ms = crate::now_ms();
+                r.agent = agent.clone();
                 break Some(r.clone());
             }
             let Some(left) = deadline.checked_duration_since(std::time::Instant::now()).filter(|d| !d.is_zero()) else { break None };
@@ -283,6 +352,18 @@ impl AgentHub {
         };
         self.changed();
         r
+    }
+
+    /// The name of the agent that last listened, when it gave one.
+    pub fn agent_name(&self) -> Option<String> {
+        self.lock().last_agent.clone()
+    }
+
+    fn mark_changed(&self, id: u64) {
+        if let Some(r) = self.lock().requests.iter_mut().find(|r| r.id == id) {
+            r.has_changes = true;
+        }
+        self.changed();
     }
 
     /// Request `id`, if it is still there.
@@ -403,11 +484,13 @@ pub struct Bubble {
     /// The selection and its length in characters, counted once for the box's hint rather than
     /// every frame.
     counted: Option<(wordcraft_engine::Selection, usize)>,
+    /// Its size last frame, to place it (a first guess before it is drawn).
+    size: Vec2,
 }
 
 impl Bubble {
     fn at(anchor: Pos) -> Self {
-        Self { anchor, text: String::new(), request: None, focused: false, counted: None }
+        Self { anchor, text: String::new(), request: None, focused: false, counted: None, size: vec2(WIDTH, 360.0) }
     }
 }
 
@@ -469,7 +552,9 @@ impl AskAgent {
             .hub
             .iter()
             .flat_map(AgentHub::requests)
-            .map(|r| json!({"id": r.id, "state": r.state.name(), "instruction": r.instruction, "reply": r.reply}))
+            .map(|r| {
+                json!({"id": r.id, "state": r.state.name(), "action": r.action.as_ref().map(|a| a.id.clone()), "apply": r.apply.name(), "instruction": r.instruction, "agent": r.agent, "reply": r.reply})
+            })
             .collect();
         json!({
             "available": self.unavailable().is_none(),
@@ -478,6 +563,7 @@ impl AskAgent {
             "bubble": self.bubble.as_ref().map(|b| json!({"request": b.request})),
             "history": self.history,
             "requests": requests,
+            "actions": crate::agent_actions::defaults().iter().map(|a| json!({"id": a.id, "label": a.label, "menu": a.menu, "apply": a.apply.name()})).collect::<Vec<_>>(),
         })
     }
 }
@@ -526,8 +612,8 @@ fn document(app: &mut WordApp) -> Value {
 }
 
 /// `ui.askAgent`. No params: open the bubble at the selection (refused, with the reason, when no
-/// agent is listening). `instruction`: send it without the box. `cancel`: cancel that request.
-/// `close`: close the bubble.
+/// agent is listening). `instruction`: send it without the box; `action`: send that quick action.
+/// `cancel`: cancel that request. `close`: close the bubble.
 pub fn command(app: &mut WordApp, p: &Value) -> Result<Value, String> {
     if let Some(id) = p.get("cancel") {
         let id = id.as_u64().ok_or("`cancel` is a request id")?;
@@ -543,6 +629,14 @@ pub fn command(app: &mut WordApp, p: &Value) -> Result<Value, String> {
         app.status(why.shown());
         return Err(why.english());
     };
+    if let Some(action) = p.get("action") {
+        let id = action.as_str().ok_or("`action` is a quick action's id")?;
+        let action =
+            crate::agent_actions::find(id).ok_or_else(|| format!("no quick action `{id}` (ui.inspect lists them under askAgent.actions)"))?;
+        let (selection, document) = (selection(app), document(app));
+        let id = hub.ask_with("", Some(&action), selection, document)?;
+        return Ok(json!({"id": id}));
+    }
     if let Some(text) = p.get("instruction") {
         let text = text.as_str().ok_or("`instruction` is text")?;
         let (selection, document) = (selection(app), document(app));
@@ -558,10 +652,65 @@ pub fn command(app: &mut WordApp, p: &Value) -> Result<Value, String> {
     Ok(json!({"pending": "askAgent"}))
 }
 
+/// Run `command` for Ask Agent request `id` (an agent's `engine.execute` with `request`): its
+/// edits become tracked changes by the agent ([`Request::author`]), whatever the document's Track
+/// Changes setting, which is left alone. Refused once the person cancelled the request or it was
+/// answered, and for edits to a request that asks for an answer only (`replyOnly`).
+pub fn run_for(app: &mut WordApp, id: u64, command: &str, run: impl FnOnce(&mut WordApp) -> Result<Value, String>) -> Result<Value, String> {
+    let request = app.ask_agent.hub.as_ref().and_then(|h| h.request(id)).ok_or_else(|| format!("no Ask Agent request {id}"))?;
+    match request.state {
+        State::Cancelled => return Err(format!("Ask Agent request {id} was cancelled by the person: `{command}` was not run")),
+        State::Answered => return Err(format!("Ask Agent request {id} is already answered: `{command}` was not run")),
+        State::Waiting | State::Working => {}
+    }
+    let mutates = app.session.registry.get(command).is_some_and(|c| c.mutates);
+    // UI commands are not classified by the engine registry and can start document edits.
+    // An answer-only request may use engine reads/selections, but no window commands.
+    if (mutates || command.starts_with("ui.")) && request.apply == Apply::ReplyOnly {
+        return Err(format!(
+            "Ask Agent request {id} asks for an answer only: the document must not change, so `{command}` was not run; answer with agent.reply"
+        ));
+    }
+    // An agent must never join the person's typing group, or leave its own group open.
+    let before = mutates.then(|| app.session.doc.clone());
+    if mutates {
+        app.session.close_typing();
+    }
+    let author = std::mem::replace(&mut app.session.author, request.author());
+    let forced = std::mem::replace(&mut app.session.force_tracking, true);
+    let r = run(app);
+    if mutates {
+        app.session.close_typing();
+    }
+    if r.is_ok()
+        && before.as_ref().is_some_and(|doc| *doc != app.session.doc)
+        && let Some(hub) = &app.ask_agent.hub
+    {
+        hub.mark_changed(id);
+    }
+    app.session.author = author;
+    app.session.force_tracking = forced;
+    r
+}
+
 /// Send what is in the box; the bubble then follows the request.
 fn send(app: &mut WordApp) {
     let Some(text) = app.ask_agent.bubble.as_ref().map(|b| b.text.clone()) else { return };
     match command(app, &json!({"instruction": text})) {
+        Ok(v) => {
+            if let Some(b) = app.ask_agent.bubble.as_mut() {
+                b.request = v.get("id").and_then(Value::as_u64);
+                b.text.clear();
+            }
+            app.canvas.want_focus = true;
+        }
+        Err(e) => app.status(tl!(&e).to_string()),
+    }
+}
+
+/// Send a quick action from the bubble; the bubble then follows the request.
+fn send_action(app: &mut WordApp, action: &str) {
+    match command(app, &json!({"action": action})) {
         Ok(v) => {
             if let Some(b) = app.ask_agent.bubble.as_mut() {
                 b.request = v.get("id").and_then(Value::as_u64);
@@ -691,8 +840,10 @@ fn show_bubble(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) -> Option
     }
     let at = crate::canvas::pos_screen(app, &anchor);
     let width = if current.as_ref().is_some_and(|r| r.reply.chars().count() > 160) { WIDE } else { WIDTH };
-    let pos = bubble_pos(at, vec2(width, 170.0), viewport)?;
+    let height = app.ask_agent.bubble.as_ref().map_or(360.0, |b| b.size.y);
+    let pos = bubble_pos(at, vec2(width, height), viewport)?;
     let present = hub.as_ref().is_some_and(AgentHub::agent_present);
+    let listening = hub.as_ref().and_then(AgentHub::agent_name);
     let animate = app.animations_on();
     let edit_id = egui::Id::new("wc_ask_agent_text");
     let typing = ctx.memory(|m| m.has_focus(edit_id));
@@ -775,11 +926,21 @@ fn show_bubble(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) -> Option
                             act = BubbleAct::Close;
                         }
                     });
+                    ui.separator();
+                    if let Some(id) = quick_actions(ui) {
+                        act = BubbleAct::Action(id);
+                    }
                 }
                 Some(r) => {
-                    // The instruction, in grey, then where it stands.
-                    ui.add(egui::Label::new(egui::RichText::new(&r.instruction).small().color(t.text_dim)).truncate()).on_hover_text(&r.instruction);
-                    status(ui, r, present, animate);
+                    // What was asked, in grey, then where it stands.
+                    ui.add(egui::Label::new(egui::RichText::new(shown_title(r)).small().color(t.text_dim)).truncate()).on_hover_text(&r.instruction);
+                    status(ui, r, present, animate, listening.as_deref());
+                    // What the agent changed is tracked: the Review tab accepts or rejects it.
+                    if r.state == State::Answered && r.has_changes {
+                        ui.label(
+                            egui::RichText::new(tl!("The agent's changes are tracked: accept or reject them on the Review tab.")).small().weak(),
+                        );
+                    }
                     ui.horizontal(|ui| {
                         if r.state.open() {
                             if ui.button(tl!("Cancel")).clicked() {
@@ -800,6 +961,9 @@ fn show_bubble(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) -> Option
     let bubble_focus = egui::Id::new("wc_ask_agent_focus");
     // The answered bubble has no text box. Clicking its text gives its container keyboard
     // focus, so Escape can close it without taking Escape from the document or another pane.
+    if let Some(b) = app.ask_agent.bubble.as_mut() {
+        b.size = rect.size();
+    }
     let press = ctx.input(|i| if i.pointer.any_pressed() { i.pointer.press_origin() } else { None });
     let released = ctx.input(|i| if i.pointer.any_released() { i.pointer.interact_pos() } else { None });
     let clicked = released.is_some_and(|p| rect.contains(p) && ctx.layer_id_at(p) == Some(shown.response.layer_id));
@@ -832,6 +996,7 @@ fn show_bubble(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) -> Option
     match act {
         BubbleAct::None => {}
         BubbleAct::Send => send(app),
+        BubbleAct::Action(id) => send_action(app, &id),
         BubbleAct::Close => {
             app.ask_agent.bubble = None;
             app.canvas.want_focus = true;
@@ -855,16 +1020,63 @@ fn show_bubble(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) -> Option
 enum BubbleAct {
     None,
     Send,
+    Action(String),
     Close,
     Cancel(u64),
     Dismiss(u64),
+}
+
+/// The quick actions, as a menu: top-level ones as items, the others in their submenus (Rewrite,
+/// Translate, More), in [`crate::agent_actions::defaults`]' order. The id of the one clicked.
+fn quick_actions(ui: &mut egui::Ui) -> Option<String> {
+    let all = crate::agent_actions::defaults();
+    let mut picked = None;
+    let mut shown: Vec<&str> = Vec::new();
+    let hint = |a: &AgentAction| match a.apply {
+        Apply::InsertBelow => tl!("Inserts the result after the selection"),
+        Apply::ReplyOnly => tl!("Answers in the bubble; changes nothing"),
+        Apply::Replace => tl!("Replaces the selection; the change is tracked"),
+        Apply::Auto => tl!("Follows the instruction; any changes are tracked"),
+    };
+    ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
+        for a in &all {
+            match a.menu.as_deref() {
+                None => {
+                    if ui.add(egui::Button::new(tl!(&a.label)).frame(false)).on_hover_text(hint(a)).clicked() {
+                        picked = Some(a.id.clone());
+                    }
+                }
+                Some(menu) if !shown.contains(&menu) && MENUS.contains(&menu) => {
+                    shown.push(menu);
+                    ui.menu_button(tl!(menu), |ui| {
+                        for b in all.iter().filter(|b| b.menu.as_deref() == Some(menu)) {
+                            if ui.button(tl!(&b.label)).on_hover_text(hint(b)).clicked() {
+                                picked = Some(b.id.clone());
+                                ui.close();
+                            }
+                        }
+                    });
+                }
+                Some(_) => {}
+            }
+        }
+    });
+    picked
+}
+
+/// A request as the window names it: the person's words, or the action's label translated.
+fn shown_title(r: &Request) -> String {
+    match &r.action {
+        Some(a) => tl!(&a.label).to_string(),
+        None => r.instruction.clone(),
+    }
 }
 
 /// A request's state, live: "Sent to your agent" the moment it is sent, "Your agent is working"
 /// as soon as the agent has it, with a spinner (a still line with animations off) and the time
 /// since it was sent; the agent's latest progress note; then its answer, whole (it wraps, and
 /// scrolls when long), or Cancelled.
-fn status(ui: &mut egui::Ui, r: &Request, present: bool, animate: bool) {
+fn status(ui: &mut egui::Ui, r: &Request, present: bool, animate: bool, listening: Option<&str>) {
     let t = Tokens::get(ui.ctx());
     let secs = ((crate::now_ms() - r.asked_ms) / 1000.0).max(0.0) as u64;
     let busy = |ui: &mut egui::Ui, text: &str| {
@@ -880,13 +1092,19 @@ fn status(ui: &mut egui::Ui, r: &Request, present: bool, animate: bool) {
         });
     };
     match r.state {
-        State::Waiting if present => busy(ui, tl!("Sent to your agent…")),
+        State::Waiting if present => match listening {
+            Some(agent) => busy(ui, &crate::i18n::fmt(tl!("Sent to {agent}…"), &[("agent", agent)])),
+            None => busy(ui, tl!("Sent to your agent…")),
+        },
         State::Waiting => {
             busy(ui, tl!("Waiting for an agent…"));
             ui.label(egui::RichText::new(tl!("No agent is listening right now.")).small().weak());
         }
         State::Working => {
-            busy(ui, tl!("Your agent is working…"));
+            match &r.agent {
+                Some(agent) => busy(ui, &crate::i18n::fmt(tl!("{agent} is working…"), &[("agent", agent)])),
+                None => busy(ui, tl!("Your agent is working…")),
+            }
             // Its latest progress note.
             if !r.reply.is_empty() {
                 ui.add(egui::Label::new(r.reply.as_str()).wrap());
@@ -949,6 +1167,7 @@ fn show_requests(app: &mut WordApp, ctx: &egui::Context, viewport: Rect, in_bubb
         return;
     }
     let present = hub.agent_present();
+    let listening = hub.agent_name();
     let animate = app.animations_on();
     let t = Tokens::get(ctx);
     egui::Area::new(egui::Id::new("wc_ask_agent_requests"))
@@ -964,8 +1183,8 @@ fn show_requests(app: &mut WordApp, ctx: &egui::Context, viewport: Rect, in_bubb
                 }
                 for r in &requests {
                     ui.separator();
-                    ui.add(egui::Label::new(egui::RichText::new(&r.instruction).small().color(t.text_dim)).truncate());
-                    status(ui, r, present, animate);
+                    ui.add(egui::Label::new(egui::RichText::new(shown_title(r)).small().color(t.text_dim)).truncate());
+                    status(ui, r, present, animate, listening.as_deref());
                     if r.state.open() {
                         if ui.small_button(tl!("Cancel")).clicked() {
                             hub.cancel(r.id);
@@ -1460,5 +1679,148 @@ mod tests {
         click(&mut h, edit.center());
         key(&mut h, Key::Escape, Modifiers::NONE);
         assert!(h.state().ask_agent.bubble.is_none(), "then Escape closes the bubble");
+    }
+
+    /// A quick action is one click: its instruction, id and `apply` reach the agent; a submenu
+    /// (Translate) works the same way.
+    #[test]
+    fn quick_actions_send_their_instruction_and_apply() {
+        use egui_kittest::kittest::Queryable;
+        let hub = AgentHub::new(7985, None);
+        hub.listen(Duration::from_millis(1), || true);
+        let mut h = window(Some(hub.clone()));
+        h.state_mut().run("select.text", json!({"text": "the clay slowly"})).unwrap();
+        h.state_mut().run("ui.askAgent", json!({})).unwrap();
+        steps(&mut h);
+        let shorten = h.get_by_label("Shorten").rect().center();
+        click(&mut h, shorten);
+        let r = hub.listen(Duration::from_millis(10), || true).expect("Shorten sent a request");
+        let v = r.to_json();
+        assert_eq!((v["action"]["id"].as_str(), v["apply"].as_str()), (Some("shorten"), Some("replace")), "{v}");
+        assert!(v["instruction"].as_str().unwrap().starts_with("Shorten the selected text"), "{v}");
+        assert_eq!(v["selection"]["text"], "the clay slowly");
+        assert_eq!(v["review"], "trackedChanges");
+        assert!(h.state().ask_agent.history.is_empty(), "actions don't crowd the recent instructions");
+        // Translate › French, from the submenu.
+        h.state_mut().run("ui.askAgent", json!({"close": true})).unwrap();
+        h.state_mut().run("ui.askAgent", json!({})).unwrap();
+        steps(&mut h);
+        let translate = h.get_by_label("Translate").rect().center();
+        click(&mut h, translate);
+        let french = h.get_by_label("French").rect().center();
+        click(&mut h, french);
+        let r = hub.listen(Duration::from_millis(10), || true).expect("Translate › French sent a request");
+        assert_eq!(r.action.as_ref().map(|a| a.id.as_str()), Some("translate.fr"));
+        // Scripts send actions by id; an unknown one is refused.
+        let id = h.state_mut().run("ui.askAgent", json!({"action": "explain"})).unwrap()["id"].as_u64().unwrap();
+        assert_eq!(hub.request(id).unwrap().apply, Apply::ReplyOnly);
+        assert!(h.state_mut().run("ui.askAgent", json!({"action": "nope"})).unwrap_err().contains("no quick action"));
+    }
+
+    /// What an agent does for a request (`engine.execute` with `request`) arrives as tracked
+    /// changes under its name, Track Changes off or on, and the person's own name and setting are
+    /// back afterwards. Edits are refused once the person cancelled, and for answer-only requests.
+    #[test]
+    fn edits_for_a_request_are_the_agents_tracked_changes() {
+        let ctx = egui::Context::default();
+        let hub = AgentHub::new(7985, None);
+        let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Default::default()).with_agent_hub(hub.clone());
+        a.run("text.insert", json!({"text": "Kilns fire clay."})).unwrap();
+        a.session.author = "Ana Writer".into();
+        a.run("select.text", json!({"text": "clay"})).unwrap();
+        let id = a.run("ui.askAgent", json!({"action": "rewrite.professional"})).unwrap()["id"].as_u64().unwrap();
+        let taken = hub.listen_as(Duration::from_millis(10), Some("  test\u{7}client  bot "), || true).unwrap();
+        assert_eq!((taken.agent.as_deref(), taken.author()), (Some("testclient bot"), "Agent (testclient bot)".to_string()));
+        let exec = |a: &mut WordApp, command: &str, params: Value| {
+            let (req, _) = crate::ControlRequest::new("engine.execute", json!({"command": command, "params": params, "request": id}));
+            match crate::control::handle(a, &ctx, &req) {
+                crate::control::Outcome::Done(v) => v,
+                crate::control::Outcome::Screenshot { .. } => Value::Null,
+            }
+        };
+        let r = exec(&mut a, "text.insert", json!({"text": "stoneware"}));
+        assert_eq!(r["ok"], true, "{r}");
+        assert!(!a.session.doc.settings.track_changes, "the person's setting is untouched");
+        assert!(!a.session.force_tracking);
+        assert_eq!(a.session.author, "Ana Writer", "the person's name is back");
+        assert!(
+            !a.session.doc.revisions.is_empty() && a.session.doc.revisions.iter().all(|r| r.author == "Agent (testclient bot)"),
+            "tracked as the agent"
+        );
+        assert_eq!(a.session.doc.plain_text(wordcraft_doc::StoryRef::Body), "Kilns fire stonewareclay.", "a revision to accept or reject");
+        // Cancelled: refused, nothing changes.
+        hub.cancel(id);
+        let before = a.session.doc.plain_text(wordcraft_doc::StoryRef::Body);
+        let r = exec(&mut a, "text.insert", json!({"text": "!"}));
+        assert!(r["error"].as_str().unwrap_or("").contains("cancelled by the person"), "{r}");
+        assert_eq!(a.session.doc.plain_text(wordcraft_doc::StoryRef::Body), before);
+        // Answer only (Explain): reading and selecting work, editing doesn't.
+        let id = a.run("ui.askAgent", json!({"action": "explain"})).unwrap()["id"].as_u64().unwrap();
+        hub.listen(Duration::from_millis(10), || true).unwrap();
+        let exec2 = |a: &mut WordApp, command: &str, params: Value| {
+            let (req, _) = crate::ControlRequest::new("engine.execute", json!({"command": command, "params": params, "request": id}));
+            match crate::control::handle(a, &ctx, &req) {
+                crate::control::Outcome::Done(v) => v,
+                crate::control::Outcome::Screenshot { .. } => Value::Null,
+            }
+        };
+        assert_eq!(exec2(&mut a, "select.text", json!({"text": "Kilns"}))["ok"], true);
+        let r = exec2(&mut a, "text.insert", json!({"text": "Ovens"}));
+        assert!(r["error"].as_str().unwrap_or("").contains("answer only"), "{r}");
+        let r = exec2(&mut a, "ui.language", json!({"value": "fr"}));
+        assert!(r["error"].as_str().unwrap_or("").contains("answer only"), "{r}");
+        // No such request.
+        let (req, _) = crate::ControlRequest::new("engine.execute", json!({"command": "text.insert", "params": {"text": "x"}, "request": 999}));
+        let crate::control::Outcome::Done(r) = crate::control::handle(&mut a, &ctx, &req) else { return };
+        assert!(r["error"].as_str().unwrap_or("").contains("no Ask Agent request 999"), "{r}");
+    }
+
+    /// The agent's edit for a request arrives as a tracked change, with Track Changes off (before
+    /// quick actions and tracked edits, it went in as a plain edit).
+    #[test]
+    fn an_agents_edit_for_a_request_is_a_tracked_change() {
+        let ctx = egui::Context::default();
+        let hub = AgentHub::new(7985, None);
+        let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Default::default()).with_agent_hub(hub.clone());
+        a.run("text.insert", json!({"text": "Kilns fire clay."})).unwrap();
+        a.run("select.text", json!({"text": "clay"})).unwrap();
+        let id = a.run("ui.askAgent", json!({"instruction": "use a better word"})).unwrap()["id"].as_u64().unwrap();
+        assert!(hub.listen(Duration::from_millis(10), || true).is_some());
+        let (req, _) =
+            crate::ControlRequest::new("engine.execute", json!({"command": "text.insert", "params": {"text": "stoneware"}, "request": id}));
+        let _ = crate::control::handle(&mut a, &ctx, &req);
+        assert!(!a.session.doc.revisions.is_empty(), "the agent's edit is a tracked change");
+        assert!(!a.session.doc.settings.track_changes, "the person's setting is untouched");
+    }
+    /// Each side of an agent's typing command is a separate Undo boundary.
+    #[test]
+    fn undo_separates_the_persons_typing_from_the_agents_edit() {
+        let hub = AgentHub::new(7985, None);
+        let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Default::default()).with_agent_hub(hub.clone());
+        a.run("text.insert", json!({"text": "Kilns fire clay."})).unwrap();
+        a.run("select.text", json!({"text": "clay"})).unwrap();
+        let id = a.run("ui.askAgent", json!({"instruction": "use stoneware"})).unwrap()["id"].as_u64().unwrap();
+        hub.listen(Duration::from_millis(1), || true).unwrap();
+        run_for(&mut a, id, "text.insert", |a| a.run("text.insert", json!({"text": "stoneware"}))).unwrap();
+        let edited = a.session.doc.clone();
+        assert!(hub.request(id).unwrap().has_changes);
+        a.run("text.insert", json!({"text": "(fired)"})).unwrap();
+        assert_eq!(a.session.doc.plain_text(wordcraft_doc::StoryRef::Body), "Kilns fire stoneware(fired)clay.");
+        a.run("edit.undo", json!({})).unwrap();
+        assert_eq!(a.session.doc, edited, "first Undo only removes the person's typing");
+        a.run("edit.undo", json!({})).unwrap();
+        assert_eq!(a.session.doc.plain_text(wordcraft_doc::StoryRef::Body), "Kilns fire clay.", "second Undo removes the agent's edit");
+        assert!(a.session.doc.revisions.is_empty());
+    }
+
+    #[test]
+    fn a_request_only_claims_changes_after_a_document_change() {
+        let hub = AgentHub::new(7985, None);
+        let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Default::default()).with_agent_hub(hub.clone());
+        let id = a.run("ui.askAgent", json!({"instruction": "write"})).unwrap()["id"].as_u64().unwrap();
+        run_for(&mut a, id, "text.insert", |_| Ok(json!({}))).unwrap();
+        assert!(!hub.request(id).unwrap().has_changes, "no-op does not claim tracked edits");
+        run_for(&mut a, id, "text.insert", |a| a.run("text.insert", json!({"text": "Pots"}))).unwrap();
+        assert!(hub.request(id).unwrap().has_changes);
     }
 }

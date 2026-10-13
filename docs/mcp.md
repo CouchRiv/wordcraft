@@ -105,7 +105,7 @@ Ctrl+Shift+O) and type an instruction. Two tools carry it, for any MCP client:
 
 | Tool | What it does |
 |---|---|
-| `wait_for_request` | waits up to `timeout_s` (default 30, at most 60) for the next request: `{id, instruction, selection: {text, anchor, focus, truncated}, document: {title, saved, language}}`, or `{none: true}` |
+| `wait_for_request` | waits up to `timeout_s` (default 30, at most 60) for the next request: `{id, instruction, action, apply, selection: {text, anchor, focus, truncated}, document: {title, saved, language}, review}`, or `{none: true}` |
 | `reply_to_request` | `{id, text, done?}`: shows `text` in the bubble under the selection; `done: false` is a progress note that keeps the request open; a request the person cancelled answers `{cancelled: true}` |
 
 The agent's loop: `wait_for_request`; at once `reply_to_request {id, text: "Rewriting…", done:
@@ -116,12 +116,20 @@ else, which is why the wait is short. The chip only shows while an agent waits, 
 never offers a button nobody answers. Without the app (`wordcraft-cli mcp`), both tools say how to
 start it. The control-channel side is in [Control protocol](control-protocol.md#ask-agent).
 
+The person can also pick a quick action (Shorten, Rewrite › Professional, Translate › French,
+More › Summarize…): the request then carries `action: {id, label}`, the action's instruction in
+plain words, and `apply`, where the result goes (`replace` the selection, `insertBelow`,
+`replyOnly`: answer only, edits refused, or `auto` for typed requests). While a request is open,
+the bridge marks the agent's `execute` calls with it, so what the agent changes arrives as tracked
+changes by `Agent (<MCP client name>)` for the person to accept or reject on the Review tab, even
+with Track Changes off; the person's own setting is left alone.
+
 ### Pushed requests (`--channel`)
 
 `wordcraft-cli mcp --connect 127.0.0.1:7981 --channel` also pushes each request to the client as
 it arrives, as an experimental `claude/channel` event: `notifications/claude/channel` with
 `content` (the instruction, the selected text and its positions) and `meta` (`request_id`,
-`document`, `language`). A client that supports the capability shows the event in the agent's
+`document`, `language`, `action`, `apply`). A client that supports the capability shows the event in the agent's
 session without a tool call, and the agent answers with `reply_to_request`; while the capability
 is a research preview, Claude Code loads such a server with
 `claude --dangerously-load-development-channels server:wordcraft`

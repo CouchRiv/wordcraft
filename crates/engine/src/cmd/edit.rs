@@ -626,7 +626,7 @@ fn replace_all(s: &mut Session, v: &Value) -> CmdResult {
     let n = results.len();
     for Found { a, b, rep } in results.into_iter().rev() {
         let with = rep.unwrap_or_default();
-        if s.doc.settings.track_changes {
+        if s.tracking() {
             // Same path as a single replace, so the change is a reviewable revision.
             s.sel = Selection { anchor: a, focus: b };
             super::paste_text(s, &with)?;
