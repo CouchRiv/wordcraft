@@ -105,7 +105,7 @@ Ctrl+Shift+O) and type an instruction. Two tools carry it, for any MCP client:
 
 | Tool | What it does |
 |---|---|
-| `wait_for_request` | waits up to `timeout_s` (default 30, at most 60) for the next request: `{id, instruction, selection: {text, anchor, focus, truncated}, document: {title, saved, language}}`, or `{none: true}` |
+| `wait_for_request` | waits up to `timeout_s` (default 30, at most 60) for the next request: `{id, instruction, action, apply, selection: {text, anchor, focus, truncated}, document: {title, saved, language}, review}`, or `{none: true}` |
 | `reply_to_request` | `{id, text, done?}`: shows `text` in the bubble under the selection; `done: false` is a progress note that keeps the request open; a request the person cancelled answers `{cancelled: true}` |
 
 The agent's loop: `wait_for_request`; at once `reply_to_request {id, text: "Rewriting…", done:
@@ -115,6 +115,14 @@ WordCraft requests and handle them". While `wait_for_request` waits this server 
 else, which is why the wait is short. The chip only shows while an agent listens, so the window
 never offers a button nobody answers. Without the app (`wordcraft-cli mcp`), both tools say how to
 start it. The control-channel side is in [Control protocol](control-protocol.md#ask-agent).
+
+The person can also pick a quick action (Shorten, Rewrite › Professional, Translate › French,
+More › Summarize…): the request then carries `action: {id, label}`, the action's instruction in
+plain words, and `apply`, where the result goes (`replace` the selection, `insertBelow`,
+`replyOnly`: answer only, edits refused, or `auto` for typed requests). While a request is open,
+the bridge marks the agent's `execute` calls with it, so what the agent changes arrives as tracked
+changes by `Agent (<MCP client name>)` for the person to accept or reject on the Review tab, even
+with Track Changes off; the person's own setting is left alone.
 
 ### Pushed requests (`--channel`)
 

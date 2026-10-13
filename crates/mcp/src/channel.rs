@@ -64,6 +64,15 @@ pub fn notification(request: &Value) -> Value {
     let selection = request.get("selection").cloned().unwrap_or(Value::Null);
     let text = selection.get("text").and_then(Value::as_str).unwrap_or("");
     let mut content = format!("Ask Agent request {id} from the WordCraft window: {instruction}");
+    if let Some(apply) = request.get("apply").and_then(Value::as_str) {
+        let where_ = match apply {
+            "replace" => "Put the result in place of the selected text.",
+            "insertBelow" => "Insert the result as new paragraphs after the selected text, which stays.",
+            "replyOnly" => "Change nothing in the document: answer with reply_to_request only.",
+            _ => "Decide from the instruction where the result goes.",
+        };
+        content.push_str(&format!(" {where_} Your edits for it are tracked changes under your name."));
+    }
     if text.is_empty() {
         content.push_str("\n\nNo text was selected (the caret's place is below).");
     } else {
@@ -76,6 +85,12 @@ pub fn notification(request: &Value) -> Value {
         selection.get("focus").unwrap_or(&Value::Null)
     ));
     let mut meta = json!({"request_id": id.to_string()});
+    if let Some(action) = request.pointer("/action/id").and_then(Value::as_str) {
+        meta["action"] = json!(action);
+    }
+    if let Some(apply) = request.get("apply").and_then(Value::as_str) {
+        meta["apply"] = json!(apply);
+    }
     let document = request.get("document");
     for (key, field) in [("document", "title"), ("language", "language")] {
         if let Some(v) = document.and_then(|d| d.get(field)).and_then(Value::as_str) {

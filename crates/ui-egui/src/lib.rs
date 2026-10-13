@@ -22,6 +22,7 @@ macro_rules! tl {
 
 pub mod a11y;
 pub mod a11y_pane;
+pub mod agent_actions;
 pub mod ask_agent;
 pub mod backstage;
 pub mod canvas;

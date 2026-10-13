@@ -2505,3 +2505,28 @@ preview	Title	Tytuł
 	Your agent is working…	Agent pracuje…
 	{seconds} s	{seconds} s
 	Enter to send, Shift+Enter for a new line	Enter wysyła, Shift+Enter dodaje nowy wiersz
+# Ask Agent quick actions
+	Sent to {agent}…	Wysłano do: {agent}…
+	{agent} is working…	{agent} pracuje…
+	The agent's changes are tracked: accept or reject them on the Review tab.	Zmiany agenta są śledzone: zaakceptuj je lub odrzuć na karcie Recenzja.
+	Inserts the result after the selection	Wstawia wynik za zaznaczeniem
+	Answers in the bubble; changes nothing	Odpowiada w dymku, niczego nie zmienia
+	Replaces the selection; the change is tracked	Zastępuje zaznaczenie, zmiana jest śledzona
+	Rewrite	Przeredaguj
+	Concise	Zwięzły
+	Friendly	Przyjazny
+	Confident	Pewny siebie
+	Shorten	Skróć
+	Fix spelling & grammar	Popraw pisownię i gramatykę
+	Simplify	Uprość
+	English	Angielski
+	French	Francuski
+	Spanish	Hiszpański
+	German	Niemiecki
+	Portuguese	Portugalski
+	More	Więcej
+	Bulletize	Zamień na listę punktowaną
+	Turn into table	Zamień na tabelę
+	Summarize	Streść
+	Continue writing	Pisz dalej
+	Explain	Wyjaśnij

@@ -53,7 +53,7 @@ fn in_use(s: &Session, rev: u32) -> bool {
 /// done) when it isn't such a cut.
 pub fn cut_tracked(s: &mut Session) -> Result<bool, CmdError> {
     let (a, b) = s.sel.ordered();
-    if !s.doc.settings.track_changes || a == b || a.story != b.story || !move_sized(&s.clipboard_text) {
+    if !s.tracking() || a == b || a.story != b.story || !move_sized(&s.clipboard_text) {
         return Ok(false);
     }
     s.doc.revisions.push(Revision::new(RevisionKind::Delete, s.author.clone(), now_iso()));

@@ -256,3 +256,18 @@ fn shared_output_keeps_messages_whole() {
     let all = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
     assert_eq!(all.lines().filter(|l| serde_json::from_str::<Value>(l).is_ok()).count(), 800);
 }
+
+/// Channel events say what a quick action wants done with the result, and name it in `meta`.
+#[test]
+fn channel_events_carry_the_action_and_where_the_result_goes() {
+    let mut r = ask_request();
+    r["action"] = json!({"id": "summarize", "label": "Summarize"});
+    r["apply"] = json!("insertBelow");
+    let e = crate::channel::notification(&r);
+    assert_eq!(e["params"]["meta"]["action"], "summarize");
+    assert_eq!(e["params"]["meta"]["apply"], "insertBelow");
+    let content = e["params"]["content"].as_str().unwrap();
+    assert!(content.contains("new paragraphs after the selected text") && content.contains("tracked changes"), "{content}");
+    r["apply"] = json!("replyOnly");
+    assert!(crate::channel::notification(&r)["params"]["content"].as_str().unwrap().contains("Change nothing in the document"));
+}

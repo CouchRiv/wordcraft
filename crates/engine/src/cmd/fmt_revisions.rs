@@ -168,7 +168,7 @@ impl Recorder<'_> {
 /// Keep the formatting changes the command `id` made to `s.doc` (compared with `before`) as
 /// tracked formatting changes, when Track Changes and Track Formatting are on.
 pub(crate) fn record(s: &mut Session, id: &str, before: &Document) {
-    if !s.doc.settings.track_changes || !s.prefs.markup.track_formatting || !records(id) {
+    if !s.tracking() || !s.prefs.markup.track_formatting || !records(id) {
         return;
     }
     let author = s.author.clone();

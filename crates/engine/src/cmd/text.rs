@@ -546,7 +546,7 @@ fn backspace_inner(s: &mut Session, _: &Value) -> CmdResult {
         Some(Block::Para(prev)) => {
             let a = Pos { story: f.story, path: prev_path, off: prev.len() };
             // An empty paragraph before a non-empty one takes the latter's formatting (Word).
-            if s.doc.settings.track_changes {
+            if s.tracking() {
                 // Tracked: the paragraph mark above is marked deleted (or removed, when this
                 // author inserted it) and the caret moves before it, as in Word.
                 s.sel = Selection { anchor: a, focus: f };
@@ -597,7 +597,7 @@ fn delete_inner(s: &mut Session, _: &Value) -> CmdResult {
     let next = f.path.with_last(f.path.last() + 1);
     if let Some(Block::Para(_)) = s.doc.block(f.story, &next) {
         let b = Pos { story: f.story, path: next, off: 0 };
-        if s.doc.settings.track_changes {
+        if s.tracking() {
             // Tracked: the paragraph mark is marked deleted (or removed, when this author
             // inserted it). A mark left in place as a deletion is stepped over, as in Word.
             let blocks = s.doc.container(f.story, &f.path).map(|c| c.len());

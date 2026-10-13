@@ -5006,3 +5006,41 @@ fn insert_picture_takes_a_windows_metafile() {
     assert!(err.to_string().contains("WMF, EMF"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Ask Agent: with `force_tracking`, an agent's edits arrive as tracked changes under its name
+/// even with Track Changes off, and neither Undo nor Redo turns the person's setting on (the
+/// setting is never touched, so no undo snapshot carries it).
+#[test]
+fn forced_tracking_records_revisions_without_touching_the_setting() {
+    let mut s = self::s();
+    run(&mut s, "document.setText", json!({"text": "Kilns fire clay."}));
+    assert!(!s.doc.settings.track_changes);
+    run(&mut s, "select.text", json!({"text": "clay"}));
+    let person = std::mem::replace(&mut s.author, "Agent (test)".into());
+    s.force_tracking = true;
+    assert!(s.tracking());
+    run(&mut s, "text.insert", json!({"text": "stoneware"}));
+    s.force_tracking = false;
+    s.author = person;
+    assert!(!s.doc.settings.track_changes, "the document's setting is untouched");
+    assert!(!s.tracking());
+    let changes = run(&mut s, "review.changes", json!({}));
+    let list = changes.get("changes").and_then(|c| c.as_array()).cloned().or_else(|| changes.as_array().cloned()).unwrap_or_default();
+    assert!(list.len() >= 2, "a deletion and an insertion: {changes}");
+    assert!(s.doc.revisions.iter().all(|r| r.author == "Agent (test)"), "by the agent");
+    assert_eq!(text(&s), "Kilns fire stonewareclay.", "the deleted word stays until it is accepted");
+    // Undo and Redo bring the edit back and forth; the setting stays the person's.
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(text(&s), "Kilns fire clay.");
+    assert!(!s.doc.settings.track_changes);
+    run(&mut s, "edit.redo", json!({}));
+    assert!(!s.doc.settings.track_changes);
+    // The person's own edits afterwards are plain edits.
+    let before = s.doc.revisions.len();
+    run(&mut s, "caret.docEnd", json!({}));
+    run(&mut s, "text.insert", json!({"text": " More."}));
+    assert_eq!(s.doc.revisions.len(), before, "no revision for the person's typing");
+    // Accept All makes the agent's change real.
+    run(&mut s, "review.acceptAll", json!({}));
+    assert_eq!(text(&s), "Kilns fire stoneware. More.");
+}
