@@ -22,6 +22,8 @@ use crate::WordApp;
 
 pub struct ControlRequest {
     pub method: String,
+    /// Set by the authenticated transport, never from JSON parameters.
+    pub connection: Option<u64>,
     pub params: Value,
     pub reply: Sender<Value>,
 }
@@ -29,7 +31,7 @@ pub struct ControlRequest {
 impl ControlRequest {
     pub fn new(method: impl Into<String>, params: Value) -> (Self, std::sync::mpsc::Receiver<Value>) {
         let (tx, rx) = std::sync::mpsc::channel();
-        (Self { method: method.into(), params, reply: tx }, rx)
+        (Self { method: method.into(), connection: None, params, reply: tx }, rx)
     }
 }
 
@@ -42,7 +44,9 @@ fn ok(v: Value) -> Outcome {
     Outcome::Done(json!({"ok": true, "result": v}))
 }
 fn err(e: impl std::fmt::Display) -> Outcome {
-    Outcome::Done(json!({"ok": false, "error": e.to_string()}))
+    let message = e.to_string();
+    let code = message.split(':').next().filter(|c| c.chars().all(|ch| ch.is_ascii_uppercase() || ch == '_')).unwrap_or("INVALID_PARAMS");
+    Outcome::Done(json!({"ok": false, "error": message, "errorCode":code}))
 }
 
 pub fn inspect(app: &mut WordApp, ctx: &egui::Context) -> Value {
@@ -108,6 +112,13 @@ fn click_events(app: &mut WordApp, pos: egui::Pos2, button: egui::PointerButton,
 }
 
 pub fn handle(app: &mut WordApp, ctx: &egui::Context, req: &ControlRequest) -> Outcome {
+    let previous = std::mem::replace(&mut app.session.human_review_only, req.connection.is_some());
+    let result = handle_inner(app, ctx, req);
+    app.session.human_review_only = previous;
+    result
+}
+
+fn handle_inner(app: &mut WordApp, ctx: &egui::Context, req: &ControlRequest) -> Outcome {
     let p = &req.params;
     let s = |k: &str| p.get(k).and_then(Value::as_str);
     let f = |k: &str| p.get(k).and_then(Value::as_f64).map(|v| v as f32);

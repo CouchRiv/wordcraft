@@ -26,7 +26,14 @@ impl ToolResult {
         Self::text(serde_json::to_string_pretty(v).unwrap_or_default())
     }
     pub fn error(t: impl Into<String>) -> Self {
-        Self { content: vec![json!({"type": "text", "text": t.into()})], is_error: true }
+        let message = t.into();
+        let text = match message.split_once(':') {
+            Some((code, _)) if !code.is_empty() && code.chars().all(|c| c.is_ascii_uppercase() || c == '_') => {
+                json!({"errorCode":code,"error":message}).to_string()
+            }
+            _ => message,
+        };
+        Self { content: vec![json!({"type": "text", "text": text})], is_error: true }
     }
     pub fn image(png_base64: String, info: &Value) -> Self {
         Self {
@@ -49,7 +56,7 @@ fn obj(props: Value, req: &[&str]) -> Value {
     json!({"type": "object", "properties": props, "required": req})
 }
 fn tool(name: &str, title: &str, desc: &str, schema: Value, ro: bool) -> Value {
-    json!({"name": name, "title": title, "description": desc, "inputSchema": schema, "annotations": {"title": title, "readOnlyHint": ro, "openWorldHint": false}})
+    json!({"name": name, "title": title, "description": desc, "inputSchema": schema, "annotations": {"title": title, "readOnlyHint": ro, "destructiveHint": false, "openWorldHint": false}})
 }
 
 pub fn tool_definitions() -> Value {
@@ -155,7 +162,7 @@ pub fn tool_definitions() -> Value {
             "wait_for_request",
             "Wait for an Ask Agent request",
             WAIT_DESCRIPTION,
-            obj(json!({"timeout_s": n("Seconds to wait (default 30, at most 60)")}), &[]),
+            json!({"type":"object","properties":{"timeout_s":{"type":"number","minimum":0,"default":30,"description":"Seconds to wait; capped at 60."},"agent":{"type":"string","description":"Optional display name; otherwise initialized MCP client name."}},"required":[],"additionalProperties":false}),
             true
         ),
         tool(
@@ -310,8 +317,24 @@ pub fn call_tool(b: &mut dyn Backend, name: &str, a: &Value) -> ToolResult {
         "ui_inspect" => wrap(b.call("ui.inspect", json!({}))),
         "wait_for_request" | "reply_to_request" if !b.has_ui() => ToolResult::error(crate::ASK_NEEDS_APP),
         "wait_for_request" => {
-            let secs = a.get("timeout_s").and_then(Value::as_f64).filter(|s| s.is_finite()).unwrap_or(30.0).clamp(0.0, MAX_WAIT_S);
-            wrap(b.call("agent.listen", json!({"timeoutMs": (secs * 1000.0).round() as u64})))
+            if a.as_object().is_none_or(|o| o.keys().any(|k| !["timeout_s", "agent"].contains(&k.as_str()))) {
+                return ToolResult::error("INVALID_PARAMS: unknown wait parameter");
+            }
+            let secs = match a.get("timeout_s") {
+                None => 30.0,
+                Some(v) => match v.as_f64().filter(|n| n.is_finite() && *n >= 0.0) {
+                    Some(n) => n.min(MAX_WAIT_S),
+                    None => return ToolResult::error("INVALID_PARAMS: timeout_s must be nonnegative"),
+                },
+            };
+            let mut params = json!({"timeoutMs":(secs*1000.0).floor() as u64});
+            if let Some(agent) = a.get("agent") {
+                if !agent.is_string() {
+                    return ToolResult::error("INVALID_PARAMS: agent must be a string");
+                }
+                params["agent"] = agent.clone();
+            }
+            wrap(b.call("agent.listen", params))
         }
         "reply_to_request" => {
             let Some(id) = a.get("id").and_then(Value::as_u64) else {

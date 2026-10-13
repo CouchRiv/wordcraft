@@ -5006,3 +5006,12 @@ fn insert_picture_takes_a_windows_metafile() {
     assert!(err.to_string().contains("WMF, EMF"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn connected_control_cannot_accept_through_nested_macro() {
+    let mut s = Session::new(wordcraft_doc::Document::new());
+    s.human_review_only = true;
+    let result =
+        s.run("tools.macros", &serde_json::json!({"define":{"name":"accept", "steps":[{"command":"review.acceptAll","params":{}}]}, "run":"accept"}));
+    assert!(result.unwrap_err().to_string().contains("HUMAN_REVIEW_REQUIRED"));
+}

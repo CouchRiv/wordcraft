@@ -155,31 +155,17 @@ impl Remote {
         Ok(reply)
     }
 
-    /// One request and its reply, with one retry on a new connection (the app may have
-    /// restarted; a new connection also reads the key again).
+    /// One request and its reply. A lost response is ambiguous and is never replayed.
     fn exchange(&mut self, id: u64, method: &str, params: &Value) -> Result<Value, String> {
         let unreachable = |addr: &str, e: std::io::Error| format!("WordCraft app at {addr} is not reachable: {e}");
-        let mut first = true;
-        let reply = loop {
-            let tried = if self.conn.is_some() { Ok(()) } else { self.reconnect() };
-            let result = match tried {
-                Ok(()) => {
-                    let line = self.request_line(id, method, params)?;
-                    self.roundtrip(&line)
-                }
-                Err(e) => Err(e),
-            };
-            match result {
-                Ok(r) => break r,
-                Err(e) => {
-                    self.conn = None;
-                    if !first {
-                        return Err(unreachable(&self.addr, e));
-                    }
-                    first = false;
-                }
-            }
-        };
+        if self.conn.is_none() {
+            self.reconnect().map_err(|e| unreachable(&self.addr, e))?;
+        }
+        let line = self.request_line(id, method, params)?;
+        let reply = self.roundtrip(&line).map_err(|e| {
+            self.conn = None;
+            format!("AMBIGUOUS_RESPONSE: request was not replayed; reconnect and inspect: {e}")
+        })?;
         serde_json::from_str(reply.trim()).map_err(|e| format!("bad reply from app: {e}"))
     }
 }
@@ -210,7 +196,8 @@ impl Backend for Remote {
                 |w| format!("unauthorized: {w}"),
             ))
         } else {
-            Err(v.get("error").and_then(Value::as_str).unwrap_or("unknown error").to_string())
+            let error = v.get("error").and_then(Value::as_str).unwrap_or("unknown error");
+            Err(v.get("errorCode").and_then(Value::as_str).map_or_else(|| error.to_string(), |code| format!("{code}: {error}")))
         }
     }
 
@@ -350,7 +337,7 @@ mod tests {
         assert_eq!(r.call("document.inspect", json!({})).unwrap(), json!(1));
         assert_eq!(reads.load(Ordering::SeqCst), 2);
 
-        // The app quits mid-session (connection closed): the retry reads the key again.
+        // An ambiguous lost response is never replayed. The next explicit call reconnects.
         let (port, seen) = fake_app(|req| if req["id"] == 2 { None } else { Some((json!({"ok": true, "result": 1}), false)) });
         let reads = Arc::new(AtomicUsize::new(0));
         let n = reads.clone();
@@ -360,7 +347,10 @@ mod tests {
         r.call("document.inspect", json!({})).unwrap_err();
         let keys: Vec<Value> = seen.try_iter().map(|v| v["key"].clone()).collect();
         assert_eq!(keys.first(), Some(&json!("key-0")), "{keys:?}");
-        assert_eq!(keys.last(), Some(&json!("key-1")), "{keys:?}");
+        assert_eq!(keys.len(), 2, "the failed call was sent exactly once");
+        assert_eq!(keys.last(), Some(&json!("key-0")), "{keys:?}");
+        assert_eq!(r.call("document.inspect", json!({})).unwrap(), json!(1));
+        assert_eq!(seen.recv_timeout(WAIT).unwrap()["key"], "key-1");
     }
 
     #[test]
