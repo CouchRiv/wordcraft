@@ -173,9 +173,10 @@ fn ask_agent_tools_carry_the_contract() {
     assert_eq!(tool(&mut s, "wait_for_request", json!({})), json!({"none": true}));
     // The wait is bounded whatever the agent asks for.
     tool(&mut s, "wait_for_request", json!({"timeout_s": 5000}));
-    tool(&mut s, "wait_for_request", json!({"timeout_s": -3}));
+    let bad = call(&mut s, 3, "tools/call", json!({"name":"wait_for_request","arguments":{"timeout_s":-3}}));
+    assert_eq!(bad["result"]["isError"], true);
     let waits: Vec<Value> = calls.lock().unwrap().iter().filter(|(m, _)| m == "agent.listen").map(|(_, p)| p["timeoutMs"].clone()).collect();
-    assert_eq!(waits, vec![json!(5000), json!(30000), json!(60000), json!(0)]);
+    assert_eq!(waits, vec![json!(5000), json!(30000), json!(60000)]);
     let r = tool(&mut s, "reply_to_request", json!({"id": 7, "text": "Cut it to one sentence."}));
     assert_eq!(r["shown"], true);
     let (m, p) = calls.lock().unwrap().last().cloned().unwrap();

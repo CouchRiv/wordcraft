@@ -218,3 +218,13 @@ the distance from the text). Missing fields are `none`, 0, no colour and 0, so a
 | `kinsoku`, `wordWrap`, `overflowPunct`, `autoSpaceDE`, `autoSpaceDN`, `snapToGrid` | bool | East Asian typography; unset = on |
 | `topLinePunct` | bool | East Asian typography; unset = off |
 | `numChange`, `fmtChange` | | Track Changes bookkeeping |
+
+### Ask Agent compatibility and ownership
+
+[Common contract](ask-agent-contract.md): keep `timeout_s`, `text`, `done`, and direct
+request results. `wait_for_request` rejects negative or incorrectly typed timeouts,
+uses integral milliseconds (floor), and caps waits at 60 seconds. A claim is tied to the
+bridge connection; sharing a display name does not grant another client ownership.
+After an ambiguous transport failure, reconnect and inspect instead of replaying edits.
+Review decisions are native human controls. The application calls no model and stores no
+model credential. Requests and drafts are kept for the current application session only.

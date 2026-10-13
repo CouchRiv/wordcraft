@@ -353,6 +353,8 @@ pub struct Session {
     /// so its edits arrive as revisions to accept or reject. Not part of the document, so Undo
     /// and Redo never turn the person's setting on.
     pub force_tracking: bool,
+    /// External control cannot resolve review, including through nested macros.
+    pub human_review_only: bool,
     /// Initials for comments (File › Options › General); empty = the name's initials.
     pub initials: String,
     /// Format painter: copied formatting waiting to be applied (and whether it stays on).
@@ -586,6 +588,7 @@ impl Session {
             registry: Arc::new(crate::cmd::registry()),
             author: "WordCraft User".into(),
             force_tracking: false,
+            human_review_only: false,
             initials: String::new(),
             painter: None,
             status: String::new(),
@@ -1019,6 +1022,7 @@ impl Session {
             author: _,
             // Like `author`: who is editing, not the document or its history.
             force_tracking: _,
+            human_review_only: _,
             initials: _,
             painter: _,
             status: _,
@@ -1125,6 +1129,9 @@ impl Session {
     /// control channel). Mutating commands are undoable; a failed command leaves the document as
     /// it was; a panic inside a command becomes an error.
     pub fn run(&mut self, id: &str, params: &Value) -> Result<Value, CmdError> {
+        if self.human_review_only && (id.starts_with("review.accept") || id.starts_with("review.reject")) {
+            return Err(CmdError::Disabled("HUMAN_REVIEW_REQUIRED: review requires native human interaction".into()));
+        }
         let join = std::mem::take(&mut self.join_next);
         let reg = self.registry.clone();
         let Some(spec) = reg.get(id) else { return Err(CmdError::Unknown(id.to_string())) };

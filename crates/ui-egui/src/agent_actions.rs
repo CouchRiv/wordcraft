@@ -5,7 +5,9 @@
 //! interface's catalogs; the list is serializable so it can later be edited in File › Options.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 
 /// What the agent does with its result.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +35,23 @@ impl Apply {
     }
 }
 
+/// The explicit authority of a request, separate from sampled context.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Scope {
+    #[default]
+    Selection,
+    Document,
+}
+impl Scope {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Selection => "selection",
+            Self::Document => "document",
+        }
+    }
+}
+
 /// One quick action.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,17 +61,19 @@ pub struct AgentAction {
     /// English label, shown translated.
     pub label: String,
     /// The submenu it sits in (`Rewrite`, `Translate`, `More`), or `None` for the top level.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub menu: Option<String>,
     /// What the agent is asked, in plain English.
     pub instruction: String,
     pub apply: Apply,
+    #[serde(default)]
+    pub scope: Scope,
 }
 
 impl AgentAction {
-    /// `{id, label}` as a request carries it.
+    /// Complete action data, with the existing id and label retained.
     pub fn to_json(&self) -> Value {
-        json!({"id": self.id, "label": self.label})
+        serde_json::to_value(self).unwrap_or(Value::Null)
     }
 }
 
@@ -87,6 +108,7 @@ pub fn defaults() -> Vec<AgentAction> {
         menu: menu.map(Into::into),
         instruction,
         apply,
+        scope: Scope::Selection,
     };
     let keep = "Keep its meaning, its facts and its language.";
     let mut v: Vec<AgentAction> = TONES

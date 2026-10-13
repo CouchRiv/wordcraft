@@ -139,7 +139,7 @@ fn peer_open(s: &TcpStream) -> bool {
 /// `agent.listen {timeoutMs?, agent?}` and `agent.reply {id, text, done?}` (Ask Agent): the
 /// reply line, and the request handed out (to put back if the reply can't be written).
 fn agent_method(agents: &AgentHub, method: &str, p: &Value, probe: &TcpStream) -> (Value, Option<u64>) {
-    let err = |e: &str| json!({"ok": false, "error": e});
+    let err = |e: &str| json!({"ok": false, "error": e, "errorCode":"INVALID_PARAMS"});
     match method {
         "agent.listen" => {
             let ms = match p.get("timeoutMs") {
@@ -149,6 +149,9 @@ fn agent_method(agents: &AgentHub, method: &str, p: &Value, probe: &TcpStream) -
                     None => return (err("`timeoutMs` is a number of milliseconds (at most 60000)"), None),
                 },
             };
+            if p.get("agent").is_some_and(|v| !v.is_string()) {
+                return (err("`agent` must be a string"), None);
+            }
             let agent = p.get("agent").and_then(Value::as_str);
             match agents.listen_as(Duration::from_millis(ms), agent, || peer_open(probe)) {
                 Some(r) => (json!({"ok": true, "result": r.to_json()}), Some(r.id)),
@@ -158,6 +161,12 @@ fn agent_method(agents: &AgentHub, method: &str, p: &Value, probe: &TcpStream) -
         _ => {
             let Some(id) = p.get("id").and_then(Value::as_u64) else { return (err("missing `id` (the request's id from agent.listen)"), None) };
             let Some(text) = p.get("text").and_then(Value::as_str) else { return (err("missing `text` (what to show in the window)"), None) };
+            if p.get("done").is_some_and(|v| !v.is_boolean()) {
+                return (err("`done` must be boolean"), None);
+            }
+            if text.chars().count() > 4000 {
+                return (err("`text` exceeds 4000 characters"), None);
+            }
             let done = p.get("done").and_then(Value::as_bool).unwrap_or(true);
             match agents.reply(id, text, done) {
                 Ok(v) => (json!({"ok": true, "result": v}), None),
@@ -180,7 +189,17 @@ impl Read for Timed {
             let left = d.checked_duration_since(Instant::now()).filter(|l| !l.is_zero()).ok_or(std::io::ErrorKind::TimedOut)?;
             self.s.set_read_timeout(Some(left))?;
         }
-        self.s.read(buf)
+        loop {
+            match self.s.read(buf) {
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
+                    if self.deadline.is_some_and(|d| Instant::now() >= d) {
+                        return Err(e);
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                result => return result,
+            }
+        }
     }
 }
 
@@ -236,6 +255,19 @@ fn serve(stream: TcpStream, tx: Sender<ControlRequest>, ctx: egui::Context, key:
     let mut authorised = false;
     // The key an `auth` request gave this connection.
     let mut conn_key: Option<String> = None;
+    static NEXT_CONNECTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let connection = NEXT_CONNECTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let monitor_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if let Ok(monitor) = probe.try_clone() {
+        let (agents, done) = (agents.clone(), monitor_done.clone());
+        std::thread::spawn(move || {
+            while !done.load(std::sync::atomic::Ordering::Relaxed) && peer_open(&monitor) {
+                agents.expire_connection(connection);
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            agents.disconnect_connection(connection);
+        });
+    }
     while let Some(line) = read_line(&mut reader) {
         let line = match line {
             Ok(l) => l,
@@ -292,7 +324,35 @@ fn serve(stream: TcpStream, tx: Sender<ControlRequest>, ctx: egui::Context, key:
         }
         // Ask Agent: answered here, never on the UI thread.
         if method == "agent.listen" || method == "agent.reply" {
+            if method == "agent.reply"
+                && let Some(id) = params.get("id").and_then(Value::as_u64)
+                && let Err(e) = agents.check_owner(id, connection)
+            {
+                let code = e.split(':').next().unwrap_or("NOT_OWNER");
+                if !reply(json!({"ok":false,"error":e,"errorCode":code})) {
+                    break;
+                }
+                continue;
+            }
+            let valid_listen = method == "agent.listen"
+                && params.get("agent").is_none_or(Value::is_string)
+                && params.get("timeoutMs").is_none_or(|v| v.as_f64().is_some_and(|n| n.is_finite() && n >= 0.0));
+            if valid_listen {
+                agents.connection_listening(connection, true);
+            }
             let (r, taken) = agent_method(agents, &method, &params, &probe);
+            if valid_listen {
+                agents.connection_listening(connection, false);
+            }
+            if let Some(id) = taken {
+                agents.claim_connection(id, connection);
+            }
+            if method == "agent.reply"
+                && r.get("ok") == Some(&json!(true))
+                && let Some(id) = params.get("id").and_then(Value::as_u64)
+            {
+                agents.connection_progress(id, connection);
+            }
             if !reply(r) {
                 // The agent never got it: back in the queue for the next one.
                 if let Some(id) = taken {
@@ -302,16 +362,54 @@ fn serve(stream: TcpStream, tx: Sender<ControlRequest>, ctx: egui::Context, key:
             }
             continue;
         }
-        let (req, rrx) = ControlRequest::new(method, params);
+        let command = if matches!(method.as_str(), "engine.execute" | "command") {
+            params.get("command").and_then(Value::as_str).or_else(|| params.get("id").and_then(Value::as_str)).unwrap_or("")
+        } else {
+            method.as_str()
+        };
+        let review = method == "ui.askAgent" || command == "ui.askAgent";
+        let review_params =
+            if matches!(method.as_str(), "engine.execute" | "command") { params.get("params").unwrap_or(&Value::Null) } else { &params };
+        if (review && ["accept", "discard", "retry", "anchorComment"].iter().any(|k| review_params.get(*k).is_some()))
+            || command.starts_with("review.accept")
+            || command.starts_with("review.reject")
+            || (command.starts_with("ui.")
+                && !["ui.inspect", "ui.screenshot", "ui.parity", "ui.askAgent"].contains(&command)
+                && !agents.requests().is_empty())
+            || ((command.starts_with("macro.") || command.starts_with("script.")) && !agents.requests().is_empty())
+        {
+            if !reply(json!({"ok":false,"error":"Review requires native human interaction","errorCode":"HUMAN_REVIEW_REQUIRED"})) {
+                break;
+            }
+            continue;
+        }
+        if let Some(id) = params.get("request").and_then(Value::as_u64)
+            && let Err(e) = agents.check_owner(id, connection)
+        {
+            if !reply(json!({"ok":false,"error":e,"errorCode":"NOT_OWNER"})) {
+                break;
+            }
+            continue;
+        }
+        let request_id = params.get("request").and_then(Value::as_u64);
+        let (mut req, rrx) = ControlRequest::new(method, params);
+        req.connection = Some(connection);
         if tx.send(req).is_err() {
             break;
         }
         ctx.request_repaint();
         let r = rrx.recv_timeout(Duration::from_secs(60)).unwrap_or_else(|_| json!({"ok": false, "error": "timeout"}));
+        if r.get("ok") == Some(&json!(true))
+            && let Some(id) = request_id
+        {
+            agents.connection_progress(id, connection);
+        }
         if !reply(r) {
             break;
         }
     }
+    monitor_done.store(true, std::sync::atomic::Ordering::Relaxed);
+    agents.disconnect_connection(connection);
 }
 
 #[cfg(test)]
@@ -372,6 +470,30 @@ mod tests {
             let mut r = String::new();
             matches!(self.0.read_line(&mut r), Ok(0))
         }
+    }
+
+    #[test]
+    fn other_connection_cannot_reply_or_review() {
+        let (port, _rx, h) = boot_agents(FIRST_REQUEST);
+        let id = h.ask("explain", sel("text"), json!({})).unwrap();
+        let mut owner = authed(port);
+        let mut other = authed(port);
+        assert_eq!(owner.call(r#"{"id":1,"method":"agent.listen","params":{"timeoutMs":0}}"#)["result"]["id"], id);
+        let reply = other.call(&json!({"id":2,"method":"agent.reply","params":{"id":id,"text":"stolen"}}).to_string());
+        assert_eq!(reply["errorCode"], "NOT_OWNER");
+        let review = owner.call(&json!({"id":3,"method":"ui.askAgent","params":{"accept":id}}).to_string());
+        assert_eq!(review["errorCode"], "HUMAN_REVIEW_REQUIRED");
+        for command in [
+            json!({"method":"engine.execute","params":{"id":"review.acceptAll"}}),
+            json!({"method":"review.rejectAll"}),
+            json!({"method":"ui.askAgent","params":{"params":{},"accept":id}}),
+            json!({"method":"engine.execute","params":{"command":null,"id":"ui.askAgent","params":{"accept":id}}}),
+            json!({"method":"ui.press","params":{"x":0,"y":0}}),
+            json!({"method":"ui.drag","params":{"x":0,"y":0}}),
+        ] {
+            assert_eq!(other.call(&command.to_string())["errorCode"], "HUMAN_REVIEW_REQUIRED");
+        }
+        assert!(h.request(id).unwrap().reply.is_empty());
     }
 
     #[test]

@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use wordcraft_doc::Pos;
 
 use crate::WordApp;
-use crate::agent_actions::{AgentAction, Apply, MENUS};
+use crate::agent_actions::{AgentAction, Apply, MENUS, Scope};
 use crate::theme::Tokens;
 
 /// The shortcut, in the registry's notation (Ctrl+Shift+O; ⌘⇧O on macOS), free in WordCraft and
@@ -28,7 +28,7 @@ pub const SHORTCUT: &str = "Mod+Shift+O";
 pub const PRESENCE_MS: f64 = 60_000.0;
 /// An open request an agent took this recently counts as an agent at work: it may edit for
 /// minutes without listening or replying.
-const WORKING_MS: f64 = 10.0 * 60_000.0;
+const WORKING_MS: f64 = PRESENCE_MS;
 /// How often a waiting `agent.listen` checks that its client is still there.
 #[cfg(not(target_arch = "wasm32"))]
 const PROBE_MS: u64 = 500;
@@ -44,6 +44,7 @@ pub const MAX_SELECTION_BYTES: usize = 100_000;
 /// Requests kept (answered and cancelled ones are dropped first).
 const KEEP: usize = 20;
 /// Requests shown in the window at once (the newest).
+#[cfg(test)]
 const SHOWN: usize = 3;
 /// Width of the instruction box and the requests card.
 const WIDTH: f32 = 340.0;
@@ -59,6 +60,8 @@ pub enum State {
     Working,
     /// The agent's reply closed it.
     Answered,
+    /// The connection failed after work began.
+    Failed,
     /// The person cancelled it.
     Cancelled,
 }
@@ -69,7 +72,15 @@ impl State {
             State::Waiting => "waiting",
             State::Working => "working",
             State::Answered => "answered",
+            State::Failed => "failed",
             State::Cancelled => "cancelled",
+        }
+    }
+    pub fn status(self) -> &'static str {
+        match self {
+            Self::Waiting => "pending",
+            Self::Answered => "ready",
+            _ => self.name(),
         }
     }
     fn open(self) -> bool {
@@ -87,6 +98,7 @@ pub struct Request {
     pub action: Option<AgentAction>,
     /// What to do with the result.
     pub apply: Apply,
+    pub scope: Scope,
     /// `{text, anchor, focus, truncated}` as it was when the person asked. Shared, so the window
     /// copies none of it when it reads the requests.
     pub selection: Arc<Value>,
@@ -99,6 +111,7 @@ pub struct Request {
     pub agent: Option<String>,
     /// Whether a command for this request actually changed the document.
     pub has_changes: bool,
+    pub failure: Option<String>,
     /// When an agent took it (`now_ms`).
     taken_ms: f64,
     /// When the person asked (`now_ms`), for the time shown while it runs.
@@ -113,9 +126,16 @@ impl Request {
             "instruction": self.instruction,
             "action": self.action.as_ref().map(AgentAction::to_json),
             "apply": self.apply.name(),
+            "scope":self.scope.name(),
+            "language":self.document.get("language"),
+            "author": if self.state==State::Waiting {Value::Null} else {json!(self.author())},
+            "status":self.state.status(),
+            "agent":self.agent.as_ref().map(|name|json!({"name":name,"color":null})),
             "selection": &*self.selection,
             "document": self.document,
             "review": "trackedChanges",
+            "retryOf":null,
+            "proposalFormats":[],
         })
     }
 
@@ -165,13 +185,19 @@ pub struct AgentHub {
     shared: Arc<(Mutex<Inner>, Condvar)>,
     port: u16,
     repaint: Option<egui::Context>,
+    connections: Arc<Mutex<Connections>>,
 }
 
 impl AgentHub {
     /// The queue of the control channel on `port`; `repaint` wakes the window when an agent
     /// takes or answers a request.
     pub fn new(port: u16, repaint: Option<egui::Context>) -> Self {
-        Self { shared: Arc::new((Mutex::new(Inner { next_id: 1, ..Default::default() }), Condvar::new())), port, repaint }
+        Self {
+            shared: Arc::new((Mutex::new(Inner { next_id: 1, ..Default::default() }), Condvar::new())),
+            port,
+            repaint,
+            connections: Default::default(),
+        }
     }
 
     pub fn port(&self) -> u16 {
@@ -196,7 +222,22 @@ impl AgentHub {
 
     /// Queue a request, from a quick action when `action` is given (its instruction is sent).
     pub fn ask_with(&self, instruction: &str, action: Option<&AgentAction>, selection: Value, document: Value) -> Result<u64, String> {
-        let instruction = cap_chars(action.map_or(instruction, |a| a.instruction.as_str()).trim(), MAX_TEXT_CHARS);
+        self.ask_scoped(instruction, action, selection, document, action.map_or(Scope::Selection, |a| a.scope))
+    }
+
+    pub fn ask_scoped(
+        &self,
+        instruction: &str,
+        action: Option<&AgentAction>,
+        selection: Value,
+        document: Value,
+        scope: Scope,
+    ) -> Result<u64, String> {
+        let instruction = action.map_or(instruction, |a| a.instruction.as_str()).trim();
+        if instruction.chars().count() > MAX_TEXT_CHARS {
+            return Err("INVALID_PARAMS: instruction exceeds 4000 characters".into());
+        }
+        let instruction = instruction.to_string();
         if instruction.is_empty() {
             return Err("type an instruction for the agent first".into());
         }
@@ -204,12 +245,17 @@ impl AgentHub {
         let request = Request {
             id: 0,
             instruction,
-            action: action.cloned(),
+            action: action.cloned().map(|mut a| {
+                a.scope = scope;
+                a
+            }),
             apply,
+            scope,
             selection: Arc::new(selection),
             document,
             state: State::Waiting,
             reply: String::new(),
+            failure: None,
             agent: None,
             has_changes: false,
             taken_ms: 0.0,
@@ -217,17 +263,15 @@ impl AgentHub {
         };
         let id = {
             let mut s = self.lock();
+            if s.requests.len() >= KEEP {
+                return Err("QUEUE_FULL: dismiss a resolved request before sending another".into());
+            }
+            if s.next_id > 9_007_199_254_740_991 {
+                return Err("QUEUE_FULL: session request ids exhausted".into());
+            }
             let id = s.next_id;
             s.next_id = s.next_id.saturating_add(1);
             s.requests.push_back(Request { id, ..request });
-            // Drop the oldest closed requests, then (only past twice the limit) the oldest.
-            while s.requests.len() > KEEP {
-                match s.requests.iter().position(|r| !r.state.open()) {
-                    Some(i) => drop(s.requests.remove(i)),
-                    None if s.requests.len() > 2 * KEEP => drop(s.requests.pop_front()),
-                    None => break,
-                }
-            }
             id
         };
         self.changed();
@@ -335,21 +379,23 @@ impl AgentHub {
         let text = cap_chars(text.trim(), MAX_TEXT_CHARS);
         let r = {
             let mut s = self.lock();
-            s.last_seen_ms = crate::now_ms();
             match s.requests.iter_mut().find(|r| r.id == id) {
                 None => Err(format!("no Ask Agent request {id}: it was never made, or the person dismissed it")),
-                Some(r) if r.state == State::Cancelled => Ok(json!({"id": id, "cancelled": true})),
-                Some(r) if r.state == State::Answered => Err(format!("Ask Agent request {id} is already answered")),
+                Some(r) if r.state == State::Cancelled => Ok(json!({"id": id, "cancelled": true, "status":"cancelled"})),
+                Some(r) if matches!(r.state, State::Answered | State::Failed) => Err(format!("Ask Agent request {id} is already answered")),
                 Some(r) => {
                     r.reply = text;
                     r.state = if done { State::Answered } else { State::Working };
                     if r.taken_ms == 0.0 {
                         r.taken_ms = crate::now_ms();
                     }
-                    Ok(json!({"id": id, "shown": true, "done": done}))
+                    Ok(json!({"id": id, "shown": true, "done": done, "status":r.state.status()}))
                 }
             }
         };
+        if r.is_ok() {
+            self.lock().last_seen_ms = crate::now_ms();
+        }
         self.changed();
         r
     }
@@ -360,6 +406,7 @@ impl AgentHub {
     }
 
     fn mark_changed(&self, id: u64) {
+        self.connections.lock().unwrap_or_else(PoisonError::into_inner).worked.insert(id);
         if let Some(r) = self.lock().requests.iter_mut().find(|r| r.id == id) {
             r.has_changes = true;
         }
@@ -395,6 +442,12 @@ impl AgentHub {
     /// took less than ten minutes ago is still open.
     pub fn agent_present(&self) -> bool {
         let now = crate::now_ms();
+        {
+            let c = self.connections.lock().unwrap_or_else(PoisonError::into_inner);
+            if c.connected_mode {
+                return !c.listening.is_empty() || c.heartbeats.values().any(|t| now - t < PRESENCE_MS);
+            }
+        }
         let s = self.lock();
         s.listeners > 0
             || (s.last_seen_ms > 0.0 && now - s.last_seen_ms < PRESENCE_MS)
@@ -469,6 +522,10 @@ pub struct AskAgent {
     /// The person's recent instructions, newest first. Kept for this session only: they can
     /// quote the document, so they aren't written to the preferences.
     pub history: Vec<String>,
+    scope: Scope,
+    frozen_target: Option<(wordcraft_engine::Selection, u64, u64)>,
+    draft: String,
+    card_collapsed: bool,
 }
 
 /// The bubble at the selection.
@@ -498,7 +555,7 @@ impl Bubble {
 /// and the mini toolbar do; the request goes on in the corner card.
 pub fn typing_resumed(app: &mut WordApp) {
     if app.ask_agent.bubble.as_ref().is_some_and(|b| b.request.is_some()) {
-        app.ask_agent.bubble = None;
+        close_bubble(app);
     }
 }
 
@@ -525,13 +582,7 @@ pub fn escape(app: &mut WordApp, ctx: &egui::Context) {
     if app.ask_agent.bubble.is_none() || !escape_is_ours(app, ctx) || !ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
         return;
     }
-    if let Some(id) = app.ask_agent.bubble.as_ref().and_then(|b| b.request)
-        && let Some(hub) = &app.ask_agent.hub
-        && hub.request(id).is_some_and(|r| !r.state.open())
-    {
-        hub.dismiss(id);
-    }
-    app.ask_agent.bubble = None;
+    close_bubble(app);
     app.canvas.want_focus = true;
 }
 
@@ -553,7 +604,7 @@ impl AskAgent {
             .iter()
             .flat_map(AgentHub::requests)
             .map(|r| {
-                json!({"id": r.id, "state": r.state.name(), "action": r.action.as_ref().map(|a| a.id.clone()), "apply": r.apply.name(), "instruction": r.instruction, "agent": r.agent, "reply": r.reply})
+                json!({"id": r.id, "state": r.state.name(),"status":r.state.status(),"scope":r.scope.name(),"error":r.failure,"errorCode":r.failure.as_ref().and_then(|e|e.split(':').next()), "action": r.action.as_ref().map(|a| a.id.clone()), "apply": r.apply.name(), "instruction": r.instruction, "agent": r.agent, "reply": r.reply})
             })
             .collect();
         json!({
@@ -608,7 +659,7 @@ fn document(app: &mut WordApp) -> Value {
         .map(|n| n.to_string_lossy().to_string())
         .or_else(|| (!s.doc.core.title.trim().is_empty()).then(|| s.doc.core.title.clone()))
         .unwrap_or_else(|| "Document1".into());
-    json!({"title": title, "saved": s.path.is_some(), "language": lang.or_else(|| s.doc.styles.default_chr.lang.clone())})
+    json!({"id": format!("document-{}", s.document_id()), "revision": s.rev().to_string(), "title": title, "saved": s.path.is_some(), "language": lang.or_else(|| s.doc.styles.default_chr.lang.clone())})
 }
 
 /// `ui.askAgent`. No params: open the bubble at the selection (refused, with the reason, when no
@@ -620,8 +671,18 @@ pub fn command(app: &mut WordApp, p: &Value) -> Result<Value, String> {
         let cancelled = app.ask_agent.hub.as_ref().is_some_and(|h| h.cancel(id));
         return Ok(json!({"cancelled": cancelled}));
     }
+    if let Some(scope) = p.get("scope") {
+        app.ask_agent.scope = match scope.as_str() {
+            Some("selection") => Scope::Selection,
+            Some("document") => Scope::Document,
+            _ => return Err("INVALID_PARAMS: scope must be selection or document".into()),
+        };
+        if p.as_object().is_some_and(|o| o.len() == 1) {
+            return Ok(json!({"scope":app.ask_agent.scope.name()}));
+        }
+    }
     if p.get("close").and_then(Value::as_bool) == Some(true) {
-        app.ask_agent.bubble = None;
+        close_bubble(app);
         return Ok(json!({}));
     }
     let Some(hub) = app.ask_agent.hub.clone() else {
@@ -633,14 +694,14 @@ pub fn command(app: &mut WordApp, p: &Value) -> Result<Value, String> {
         let id = action.as_str().ok_or("`action` is a quick action's id")?;
         let action =
             crate::agent_actions::find(id).ok_or_else(|| format!("no quick action `{id}` (ui.inspect lists them under askAgent.actions)"))?;
-        let (selection, document) = (selection(app), document(app));
-        let id = hub.ask_with("", Some(&action), selection, document)?;
+        let (selection, document) = captured_target(app)?;
+        let id = hub.ask_scoped("", Some(&action), selection, document, app.ask_agent.scope)?;
         return Ok(json!({"id": id}));
     }
     if let Some(text) = p.get("instruction") {
         let text = text.as_str().ok_or("`instruction` is text")?;
-        let (selection, document) = (selection(app), document(app));
-        let id = hub.ask(text, selection, document)?;
+        let (selection, document) = captured_target(app)?;
+        let id = hub.ask_scoped(text, None, selection, document, app.ask_agent.scope)?;
         remember(&mut app.ask_agent.history, text);
         return Ok(json!({"id": id}));
     }
@@ -648,7 +709,10 @@ pub fn command(app: &mut WordApp, p: &Value) -> Result<Value, String> {
         app.status(why.shown());
         return Err(why.english());
     }
-    app.ask_agent.bubble = Some(Bubble::at(app.session.sel.ordered().1));
+    app.ask_agent.frozen_target = Some((app.session.sel.clone(), app.session.document_id(), app.session.rev()));
+    let mut bubble = Bubble::at(app.session.sel.ordered().1);
+    bubble.text = app.ask_agent.draft.clone();
+    app.ask_agent.bubble = Some(bubble);
     Ok(json!({"pending": "askAgent"}))
 }
 
@@ -657,13 +721,18 @@ pub fn command(app: &mut WordApp, p: &Value) -> Result<Value, String> {
 /// Changes setting, which is left alone. Refused once the person cancelled the request or it was
 /// answered, and for edits to a request that asks for an answer only (`replyOnly`).
 pub fn run_for(app: &mut WordApp, id: u64, command: &str, run: impl FnOnce(&mut WordApp) -> Result<Value, String>) -> Result<Value, String> {
+    if matches!(command, "tools.macros" | "tools.recordMacro" | "edit.repeat") {
+        return Err("OUT_OF_SCOPE: indirect command needs a separate native human action".into());
+    }
     let request = app.ask_agent.hub.as_ref().and_then(|h| h.request(id)).ok_or_else(|| format!("no Ask Agent request {id}"))?;
     match request.state {
         State::Cancelled => return Err(format!("Ask Agent request {id} was cancelled by the person: `{command}` was not run")),
-        State::Answered => return Err(format!("Ask Agent request {id} is already answered: `{command}` was not run")),
+        State::Answered | State::Failed => return Err(format!("Ask Agent request {id} is already answered: `{command}` was not run")),
         State::Waiting | State::Working => {}
     }
-    let mutates = app.session.registry.get(command).is_some_and(|c| c.mutates);
+    let mutates = app.session.registry.get(command).is_some_and(|c| c.mutates)
+        || matches!(command, "edit.undo" | "edit.undoTo" | "edit.redo" | "edit.repeat" | "tools.macros" | "tools.recordMacro")
+        || command.starts_with("file.");
     // UI commands are not classified by the engine registry and can start document edits.
     // An answer-only request may use engine reads/selections, but no window commands.
     if (mutates || command.starts_with("ui.")) && request.apply == Apply::ReplyOnly {
@@ -691,6 +760,33 @@ pub fn run_for(app: &mut WordApp, id: u64, command: &str, run: impl FnOnce(&mut 
     app.session.author = author;
     app.session.force_tracking = forced;
     r
+}
+
+fn close_bubble(app: &mut WordApp) {
+    if let Some(b) = app.ask_agent.bubble.take()
+        && b.request.is_none()
+    {
+        app.ask_agent.draft = b.text;
+    }
+}
+
+fn captured_target(app: &mut WordApp) -> Result<(Value, Value), String> {
+    let current = app.session.sel.clone();
+    if let Some((selection, document_id, revision)) = &app.ask_agent.frozen_target
+        && app.ask_agent.bubble.as_ref().is_some_and(|b| b.request.is_none())
+    {
+        if app.session.document_id() != *document_id || app.session.rev() != *revision {
+            return Err("STALE_TARGET: captured target changed; reopen Ask Agent".into());
+        }
+        app.session.sel = selection.clone();
+    }
+    if app.ask_agent.scope == Scope::Document {
+        app.session.sel = wordcraft_engine::Selection::caret(Pos::body(0, 0));
+        app.session.run("select.all", &json!({})).map_err(|e| e.to_string())?;
+    }
+    let result = (selection(app), document(app));
+    app.session.sel = current;
+    Ok(result)
 }
 
 /// Send what is in the box; the bubble then follows the request.
@@ -835,7 +931,7 @@ fn show_bubble(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) -> Option
     let current = request.and_then(|id| hub.as_ref()?.request(id));
     // Its request was dismissed (from the corner card, or by a script): nothing left to show.
     if request.is_some() && current.is_none() {
-        app.ask_agent.bubble = None;
+        close_bubble(app);
         return None;
     }
     let at = crate::canvas::pos_screen(app, &anchor);
@@ -876,6 +972,15 @@ fn show_bubble(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) -> Option
                         crate::i18n::fmt(tl!("The agent gets the selected text ({count} characters)."), &[("count", &chars.to_string())])
                     };
                     ui.label(egui::RichText::new(about).small().weak());
+                    egui::ComboBox::from_id_salt("wc_ask_scope")
+                        .selected_text(match app.ask_agent.scope {
+                            Scope::Selection => tl!("Selection"),
+                            Scope::Document => tl!("Document"),
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut app.ask_agent.scope, Scope::Selection, tl!("Selection"));
+                            ui.selectable_value(&mut app.ask_agent.scope, Scope::Document, tl!("Document"));
+                        });
                     // Enter sends, Shift+Enter starts a new line, Up in an empty box brings back the
                     // last instruction.
                     let enter = typing && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
@@ -947,7 +1052,7 @@ fn show_bubble(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) -> Option
                                 act = BubbleAct::Cancel(r.id);
                             }
                         } else if ui.button(tl!("Close")).clicked() {
-                            act = BubbleAct::Dismiss(r.id);
+                            act = BubbleAct::Close;
                         }
                     });
                 }
@@ -989,7 +1094,7 @@ fn show_bubble(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) -> Option
         press.is_some_and(|p| viewport.contains(p) && !rect.contains(p) && !ctx.layer_id_at(p).is_some_and(|l| l.order >= Order::Foreground));
     if matches!(act, BubbleAct::None) && elsewhere {
         act = match &current {
-            Some(r) if !r.state.open() => BubbleAct::Dismiss(r.id),
+            Some(_) => BubbleAct::Close,
             _ => BubbleAct::Close,
         };
     }
@@ -998,20 +1103,13 @@ fn show_bubble(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) -> Option
         BubbleAct::Send => send(app),
         BubbleAct::Action(id) => send_action(app, &id),
         BubbleAct::Close => {
-            app.ask_agent.bubble = None;
+            close_bubble(app);
             app.canvas.want_focus = true;
         }
         BubbleAct::Cancel(id) => {
             if let Some(h) = &hub {
                 h.cancel(id);
             }
-        }
-        BubbleAct::Dismiss(id) => {
-            if let Some(h) = &hub {
-                h.dismiss(id);
-            }
-            app.ask_agent.bubble = None;
-            app.canvas.want_focus = true;
         }
     }
     request
@@ -1023,7 +1121,6 @@ enum BubbleAct {
     Action(String),
     Close,
     Cancel(u64),
-    Dismiss(u64),
 }
 
 /// The quick actions, as a menu: top-level ones as items, the others in their submenus (Rewrite,
@@ -1117,6 +1214,7 @@ fn status(ui: &mut egui::Ui, r: &Request, present: bool, animate: bool, listenin
                 ui.add(egui::Label::new(r.reply.as_str()).selectable(true).wrap());
             });
         }
+        State::Failed => drop(ui.label(egui::RichText::new(tl!("Failed")).weak())),
         State::Cancelled => drop(ui.label(egui::RichText::new(tl!("Cancelled")).weak())),
     }
 }
@@ -1162,14 +1260,27 @@ fn close_button(ui: &mut egui::Ui, t: &Tokens) -> bool {
 /// The requests the bubble doesn't show, newest last, in the canvas's bottom-right corner.
 fn show_requests(app: &mut WordApp, ctx: &egui::Context, viewport: Rect, in_bubble: Option<u64>) {
     let Some(hub) = app.ask_agent.hub.clone() else { return };
-    let requests = hub.newest(SHOWN, in_bubble);
+    let requests = hub.newest(KEEP, in_bubble);
     if requests.is_empty() {
+        return;
+    }
+    if app.ask_agent.card_collapsed {
+        let open = egui::Area::new(egui::Id::new("wc_ask_agent_requests_collapsed"))
+            .order(Order::Foreground)
+            .pivot(Align2::RIGHT_BOTTOM)
+            .fixed_pos(viewport.right_bottom() - vec2(16.0, 16.0))
+            .show(ctx, |ui| ui.button(format!("{} ({})", tl!("Ask Agent"), requests.len())).clicked())
+            .inner;
+        if open {
+            app.ask_agent.card_collapsed = false;
+        }
         return;
     }
     let present = hub.agent_present();
     let listening = hub.agent_name();
     let animate = app.animations_on();
     let t = Tokens::get(ctx);
+    let mut reopen = None;
     egui::Area::new(egui::Id::new("wc_ask_agent_requests"))
         .order(Order::Foreground)
         .pivot(Align2::RIGHT_BOTTOM)
@@ -1181,24 +1292,35 @@ fn show_requests(app: &mut WordApp, ctx: &egui::Context, viewport: Rect, in_bubb
                 if header(ui, &t) {
                     close = true;
                 }
-                for r in &requests {
-                    ui.separator();
-                    ui.add(egui::Label::new(egui::RichText::new(shown_title(r)).small().color(t.text_dim)).truncate());
-                    status(ui, r, present, animate, listening.as_deref());
-                    if r.state.open() {
-                        if ui.small_button(tl!("Cancel")).clicked() {
-                            hub.cancel(r.id);
+                egui::ScrollArea::vertical().max_height(viewport.height() * 0.6).show(ui, |ui| {
+                    for r in &requests {
+                        ui.separator();
+                        ui.add(egui::Label::new(egui::RichText::new(&r.instruction).small().color(t.text_dim)).truncate());
+                        status(ui, r, present, animate, listening.as_deref());
+                        if ui.small_button(tl!("Open request")).clicked() {
+                            reopen = Some(r.id);
                         }
-                    } else if ui.small_button(tl!("Dismiss")).clicked() {
-                        hub.dismiss(r.id);
+                        if r.state.open() {
+                            if ui.small_button(tl!("Cancel")).clicked() {
+                                hub.cancel(r.id);
+                            }
+                        } else if ui.small_button(tl!("Dismiss")).clicked() {
+                            hub.dismiss(r.id);
+                        }
                     }
-                }
-                // Closing the card puts away the answered and cancelled requests; open ones stay.
+                });
                 if close {
-                    hub.dismiss_closed(in_bubble);
+                    app.ask_agent.card_collapsed = true;
                 }
             });
         });
+    if let Some(id) = reopen {
+        let anchor = hub
+            .request(id)
+            .and_then(|r| r.selection.get("focus").and_then(wordcraft_engine::cmd::parse_pos))
+            .unwrap_or_else(|| app.session.sel.focus.clone());
+        app.ask_agent.bubble = Some(Bubble { request: Some(id), ..Bubble::at(anchor) });
+    }
 }
 
 #[cfg(test)]
@@ -1282,24 +1404,19 @@ mod tests {
     fn hostile_text_is_capped_and_empty_instructions_refused() {
         let hub = AgentHub::new(7981, None);
         assert!(hub.ask("   ", sel(""), json!({})).is_err());
-        let id = hub.ask(&"é".repeat(MAX_TEXT_CHARS + 50), sel(""), json!({})).unwrap();
-        let r = &hub.requests()[0];
-        assert_eq!(r.instruction.chars().count(), MAX_TEXT_CHARS + 1, "cut, with …");
-        hub.reply(id, &"ü".repeat(MAX_TEXT_CHARS * 3), true).unwrap();
-        assert_eq!(hub.requests()[0].reply.chars().count(), MAX_TEXT_CHARS + 1);
-        let mut s = "ab€".repeat(10);
-        assert!(cap_bytes(&mut s, 4));
-        assert_eq!(s, "ab", "cut at a character boundary");
-        // The queue stays bounded however many requests come.
-        for i in 0..200 {
-            let id = hub.ask(&format!("r{i}"), sel(""), json!({})).unwrap();
-            hub.cancel(id);
-        }
-        assert!(hub.requests().len() <= KEEP);
-        for i in 0..200 {
+        assert!(hub.ask(&"a".repeat(MAX_TEXT_CHARS + 1), sel(""), json!({})).is_err());
+        let mut text = "ab€".repeat(10);
+        assert!(cap_bytes(&mut text, 4));
+        assert_eq!(text, "ab");
+        for i in 0..KEEP {
             hub.ask(&format!("open {i}"), sel(""), json!({})).unwrap();
         }
-        assert!(hub.requests().len() <= 2 * KEEP);
+        let ids: Vec<_> = hub.requests().iter().map(|r| r.id).collect();
+        assert!(hub.ask("overflow", sel(""), json!({})).unwrap_err().starts_with("QUEUE_FULL"));
+        assert_eq!(hub.requests().iter().map(|r| r.id).collect::<Vec<_>>(), ids);
+        hub.cancel(ids[0]);
+        hub.dismiss(ids[0]);
+        assert!(hub.ask("after dismissal", sel(""), json!({})).is_ok());
     }
 
     #[test]
@@ -1500,7 +1617,10 @@ mod tests {
         let r = hub.listen(Duration::from_millis(10), || true).expect("the request is queued");
         assert_eq!(r.instruction, "make it formal");
         assert_eq!(r.selection["text"], "the clay slowly");
-        assert_eq!(r.document, json!({"title": "Document1", "saved": false, "language": "en-US"}), "a new document goes by the window's name");
+        assert_eq!(r.document["title"], "Document1", "a new document goes by the window's name");
+        assert_eq!(r.document["saved"], false);
+        assert_eq!(r.document["language"], "en-US");
+        assert!(r.document["id"].is_string() && r.document["revision"].is_string());
         assert_eq!(h.state().ask_agent.history, vec!["make it formal".to_string()]);
         steps(&mut h);
         assert!(h.query_by_label_contains("Your agent is working").is_some(), "the bubble says the agent has it");
@@ -1519,10 +1639,10 @@ mod tests {
         let rect = h.ctx.read_response(egui::Id::new("wc_ask_agent_focus")).unwrap().rect;
         click(&mut h, rect.center());
         assert!(escape_is_ours(h.state(), &h.ctx), "clicked bubble focus: {:?}", h.ctx.memory(|m| m.focused()));
-        // Escape puts the focused answered request away.
+        // Escape closes the focused bubble and preserves the answer.
         key(&mut h, Key::Escape, Modifiers::NONE);
         assert!(h.state().ask_agent.bubble.is_none());
-        assert!(hub.requests().is_empty());
+        assert_eq!(hub.requests().len(), 1);
     }
 
     /// Cancelling from the bubble reaches the agent; the shortcut opens the bubble too, Escape
@@ -1557,6 +1677,23 @@ mod tests {
         let cancel = h.get_by_label("Cancel").rect().center();
         click(&mut h, cancel);
         assert_eq!(hub.reply(r.id, "Traduit.", true).unwrap()["cancelled"], true, "the agent learns it was cancelled");
+    }
+
+    #[test]
+    fn moving_selection_before_send_keeps_the_opened_target_and_draft() {
+        let hub = AgentHub::new(1, None);
+        hub.listen(Duration::ZERO, || true);
+        let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Default::default()).with_agent_hub(hub.clone());
+        a.run("text.insert", json!({"text":"Original target"})).unwrap();
+        a.run("select.all", json!({})).unwrap();
+        a.run("ui.askAgent", json!({})).unwrap();
+        a.ask_agent.bubble.as_mut().unwrap().text = "saved draft".into();
+        a.run("caret.docStart", json!({})).unwrap();
+        a.run("ui.askAgent", json!({"instruction":"explain"})).unwrap();
+        assert_eq!(hub.requests()[0].selection["text"], "Original target");
+        a.run("ui.askAgent", json!({"close":true})).unwrap();
+        a.run("ui.askAgent", json!({})).unwrap();
+        assert_eq!(a.ask_agent.bubble.as_ref().unwrap().text, "saved draft");
     }
 
     /// Without a control channel `ui.askAgent` says how to get one; programmatic requests and
@@ -1822,5 +1959,202 @@ mod tests {
         assert!(!hub.request(id).unwrap().has_changes, "no-op does not claim tracked edits");
         run_for(&mut a, id, "text.insert", |a| a.run("text.insert", json!({"text": "Pots"}))).unwrap();
         assert!(hub.request(id).unwrap().has_changes);
+    }
+}
+
+/// Connection identities are capabilities, independent of display names.
+#[derive(Default)]
+struct Connections {
+    connected_mode: bool,
+    owners: std::collections::BTreeMap<u64, u64>,
+    heartbeats: std::collections::BTreeMap<u64, f64>,
+    worked: std::collections::BTreeSet<u64>,
+    listening: std::collections::BTreeSet<u64>,
+}
+
+impl AgentHub {
+    pub fn connection_listening(&self, connection: u64, listening: bool) {
+        let mut c = self.connections.lock().unwrap_or_else(PoisonError::into_inner);
+        c.connected_mode = true;
+        if listening {
+            c.listening.insert(connection);
+        } else {
+            c.listening.remove(&connection);
+        }
+        c.heartbeats.insert(connection, crate::now_ms());
+    }
+
+    pub fn expire_connection(&self, connection: u64) {
+        let ids = {
+            let c = self.connections.lock().unwrap_or_else(PoisonError::into_inner);
+            if c.listening.contains(&connection) || c.heartbeats.get(&connection).is_none_or(|t| crate::now_ms() - t < PRESENCE_MS) {
+                return;
+            }
+            c.owners.iter().filter(|(_, owner)| **owner == connection).map(|(id, _)| *id).collect::<Vec<_>>()
+        };
+        let mut s = self.lock();
+        for id in ids {
+            if let Some(r) = s.requests.iter_mut().find(|r| r.id == id && r.state == State::Working) {
+                r.state = State::Failed;
+                r.failure = Some("AGENT_TIMEOUT: no heartbeat for 60 seconds".into());
+            }
+        }
+        drop(s);
+        self.changed();
+    }
+
+    pub fn claim_connection(&self, id: u64, connection: u64) {
+        let mut c = self.connections.lock().unwrap_or_else(PoisonError::into_inner);
+        c.connected_mode = true;
+        c.owners.insert(id, connection);
+        c.heartbeats.insert(connection, crate::now_ms());
+    }
+
+    pub fn connection_request(&self, connection: u64) -> Option<u64> {
+        let requests = self.requests();
+        let c = self.connections.lock().unwrap_or_else(PoisonError::into_inner);
+        requests.iter().find(|r| r.state == State::Working && c.owners.get(&r.id) == Some(&connection)).map(|r| r.id)
+    }
+
+    pub fn check_owner(&self, id: u64, connection: u64) -> Result<(), String> {
+        if self.request(id).is_none() {
+            return Err(format!("REQUEST_NOT_FOUND: no Ask Agent request {id}"));
+        }
+        let c = self.connections.lock().unwrap_or_else(PoisonError::into_inner);
+        if c.owners.get(&id) != Some(&connection) {
+            return Err("NOT_OWNER: request belongs to another connection".into());
+        }
+        Ok(())
+    }
+
+    pub fn connection_progress(&self, id: u64, connection: u64) {
+        let mut c = self.connections.lock().unwrap_or_else(PoisonError::into_inner);
+        c.worked.insert(id);
+        c.heartbeats.insert(connection, crate::now_ms());
+    }
+
+    pub fn disconnect_connection(&self, connection: u64) {
+        let ids = {
+            let mut c = self.connections.lock().unwrap_or_else(PoisonError::into_inner);
+            c.heartbeats.remove(&connection);
+            c.listening.remove(&connection);
+            let ids: Vec<_> = c.owners.iter().filter(|(_, owner)| **owner == connection).map(|(id, _)| (*id, c.worked.contains(id))).collect();
+            c.owners.retain(|_, owner| *owner != connection);
+            ids
+        };
+        let mut s = self.lock();
+        for (id, worked) in ids {
+            if let Some(r) = s.requests.iter_mut().find(|r| r.id == id && r.state == State::Working) {
+                r.state = if worked || r.has_changes { State::Failed } else { State::Waiting };
+                if worked || r.has_changes {
+                    r.failure = Some("AGENT_DISCONNECTED: owner connection closed".into());
+                }
+            }
+        }
+        drop(s);
+        self.changed();
+    }
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+    #[test]
+    fn owner_is_connection_and_disconnect_preserves_work() {
+        let h = AgentHub::new(1, None);
+        let id = h.ask("explain", json!({}), json!({})).unwrap();
+        h.listen(std::time::Duration::ZERO, || true).unwrap();
+        h.claim_connection(id, 11);
+        assert!(h.check_owner(id, 12).unwrap_err().starts_with("NOT_OWNER"));
+        h.disconnect_connection(11);
+        assert_eq!(h.request(id).unwrap().state, State::Waiting);
+        h.listen(std::time::Duration::ZERO, || true).unwrap();
+        h.claim_connection(id, 12);
+        h.reply(id, "progress", false).unwrap();
+        h.connection_progress(id, 12);
+        h.disconnect_connection(12);
+        assert_eq!(h.request(id).unwrap().state, State::Failed);
+    }
+    #[test]
+    fn unauthenticated_disconnect_cannot_remove_other_presence() {
+        let h = AgentHub::new(1, None);
+        h.connection_listening(11, false);
+        h.disconnect_connection(22);
+        assert!(h.agent_present());
+        h.disconnect_connection(11);
+        assert!(!h.agent_present());
+    }
+
+    #[test]
+    fn native_dispatch_requires_claim_even_when_request_tag_is_omitted() {
+        let h = AgentHub::new(1, None);
+        let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Default::default()).with_agent_hub(h.clone());
+        a.run("text.insert", json!({"text":"clay"})).unwrap();
+        a.run("select.all", json!({})).unwrap();
+        let id = a.run("ui.askAgent", json!({"instruction":"rewrite"})).unwrap()["id"].as_u64().unwrap();
+        h.listen_as(std::time::Duration::ZERO, Some("same name"), || true).unwrap();
+        h.claim_connection(id, 11);
+        let before = a.session.doc.clone();
+        let (mut req, _) = crate::ControlRequest::new("text.insert", json!({"text":"stoneware"}));
+        req.connection = Some(12);
+        let crate::control::Outcome::Done(result) = crate::control::handle(&mut a, &egui::Context::default(), &req) else {
+            panic!("unexpected screenshot")
+        };
+        assert_eq!(result["errorCode"], "NOT_OWNER");
+        assert_eq!(a.session.doc, before);
+        req.connection = Some(11);
+        let crate::control::Outcome::Done(result) = crate::control::handle(&mut a, &egui::Context::default(), &req) else {
+            panic!("unexpected screenshot")
+        };
+        assert_eq!(result["ok"], true, "{result}");
+        assert!(h.request(id).unwrap().has_changes);
+    }
+
+    #[test]
+    fn readonly_request_refuses_indirect_mutation_and_undo() {
+        let h = AgentHub::new(1, None);
+        let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Default::default()).with_agent_hub(h.clone());
+        a.run("text.insert", json!({"text":"clay"})).unwrap();
+        let id = a.run("ui.askAgent", json!({"action":"explain"})).unwrap()["id"].as_u64().unwrap();
+        h.listen(std::time::Duration::ZERO, || true).unwrap();
+        let before = a.session.doc.clone();
+        for command in ["tools.macros", "edit.repeat", "edit.undo", "file.new"] {
+            assert!(run_for(&mut a, id, command, |app| app.execute(command, json!({}))).is_err(), "{command}");
+        }
+        assert_eq!(a.session.doc, before);
+    }
+
+    #[test]
+    fn explicit_scope_and_complete_action_are_delivered_atomically() {
+        let h = AgentHub::new(1, None);
+        let action = crate::agent_actions::find("shorten").unwrap();
+        let id = h.ask_scoped("", Some(&action), json!({}), json!({"id":"doc","revision":"0","language":"fr"}), Scope::Document).unwrap();
+        let r = h.listen_as(std::time::Duration::ZERO, Some("editor"), || true).unwrap().to_json();
+        assert_eq!(r["id"], id);
+        assert_eq!(r["scope"], "document");
+        for key in ["id", "label", "menu", "scope", "instruction", "apply"] {
+            assert!(r["action"].get(key).is_some(), "{key}");
+        }
+        assert_eq!(r["action"]["scope"], "document");
+        assert_eq!(r["status"], "working");
+        assert_eq!(r["language"], "fr");
+    }
+
+    #[test]
+    fn invalid_reply_does_not_create_presence() {
+        let h = AgentHub::new(1, None);
+        assert!(h.reply(999, "invalid", true).is_err());
+        assert!(!h.agent_present());
+    }
+    #[test]
+    fn working_lease_expires_without_valid_heartbeat() {
+        let h = AgentHub::new(1, None);
+        let id = h.ask("explain", json!({}), json!({})).unwrap();
+        h.listen(std::time::Duration::ZERO, || true).unwrap();
+        h.claim_connection(id, 11);
+        h.connections.lock().unwrap().heartbeats.insert(11, crate::now_ms() - PRESENCE_MS - 1.0);
+        h.expire_connection(11);
+        assert_eq!(h.request(id).unwrap().state, State::Failed);
+        assert!(h.request(id).unwrap().failure.unwrap().starts_with("AGENT_TIMEOUT"));
     }
 }

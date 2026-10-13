@@ -23,6 +23,8 @@ use crate::WordApp;
 
 pub struct ControlRequest {
     pub method: String,
+    /// Set by the authenticated transport, never from JSON parameters.
+    pub connection: Option<u64>,
     pub params: Value,
     pub reply: Sender<Value>,
 }
@@ -30,7 +32,7 @@ pub struct ControlRequest {
 impl ControlRequest {
     pub fn new(method: impl Into<String>, params: Value) -> (Self, std::sync::mpsc::Receiver<Value>) {
         let (tx, rx) = std::sync::mpsc::channel();
-        (Self { method: method.into(), params, reply: tx }, rx)
+        (Self { method: method.into(), connection: None, params, reply: tx }, rx)
     }
 }
 
@@ -43,7 +45,9 @@ fn ok(v: Value) -> Outcome {
     Outcome::Done(json!({"ok": true, "result": v}))
 }
 fn err(e: impl std::fmt::Display) -> Outcome {
-    Outcome::Done(json!({"ok": false, "error": e.to_string()}))
+    let message = e.to_string();
+    let code = message.split(':').next().filter(|c| c.chars().all(|ch| ch.is_ascii_uppercase() || ch == '_')).unwrap_or("INVALID_PARAMS");
+    Outcome::Done(json!({"ok": false, "error": message, "errorCode":code}))
 }
 
 pub fn inspect(app: &mut WordApp, ctx: &egui::Context) -> Value {
@@ -109,6 +113,46 @@ fn click_events(app: &mut WordApp, pos: egui::Pos2, button: egui::PointerButton,
 }
 
 pub fn handle(app: &mut WordApp, ctx: &egui::Context, req: &ControlRequest) -> Outcome {
+    let previous = std::mem::replace(&mut app.session.human_review_only, req.connection.is_some());
+    let result = handle_inner(app, ctx, req);
+    app.session.human_review_only = previous;
+    result
+}
+
+fn execute_control(app: &mut WordApp, req: &ControlRequest, command: &str, params: Value) -> Result<Value, String> {
+    if command == "ui.askAgent" {
+        return app.execute(command, params);
+    }
+    let requested = match req.params.get("request") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_u64().ok_or("INVALID_PARAMS: request must be an integer")?),
+    };
+    let hub = app.ask_agent.hub.clone();
+    let request = requested.or_else(|| req.connection.and_then(|conn| hub.as_ref().and_then(|h| h.connection_request(conn))));
+    if let (Some(conn), Some(id), Some(hub)) = (req.connection, request, hub.as_ref()) {
+        hub.check_owner(id, conn)?;
+    }
+    let mutating = app.session.registry.get(command).is_some_and(|c| c.mutates)
+        || matches!(command, "edit.undo" | "edit.undoTo" | "edit.redo" | "edit.repeat" | "tools.macros" | "tools.recordMacro")
+        || command.starts_with("file.")
+        || command.starts_with("ui.");
+    if req.connection.is_some()
+        && request.is_none()
+        && mutating
+        && hub.as_ref().is_some_and(|h| {
+            h.requests().iter().any(|r| matches!(r.state, crate::ask_agent::State::Waiting | crate::ask_agent::State::Working) || r.has_changes)
+        })
+        && command != "ui.askAgent"
+    {
+        return Err("NOT_OWNER: a document mutation during Ask Agent requires an owned request".into());
+    }
+    match request {
+        Some(id) => crate::ask_agent::run_for(app, id, command, |app| app.execute(command, params)),
+        None => app.execute(command, params),
+    }
+}
+
+fn handle_inner(app: &mut WordApp, ctx: &egui::Context, req: &ControlRequest) -> Outcome {
     let p = &req.params;
     let s = |k: &str| p.get(k).and_then(Value::as_str);
     let f = |k: &str| p.get(k).and_then(Value::as_f64).map(|v| v as f32);
@@ -116,14 +160,7 @@ pub fn handle(app: &mut WordApp, ctx: &egui::Context, req: &ControlRequest) -> O
         "engine.execute" | "command" => {
             let Some(id) = s("command").or(s("id")) else { return err("missing `command`") };
             let params = p.get("params").cloned().filter(|v| !v.is_null()).unwrap_or(json!({}));
-            // `request`: run for that Ask Agent request, as the agent's tracked change.
-            let r = match p.get("request") {
-                None | Some(Value::Null) => app.execute(id, params),
-                Some(r) => match r.as_u64() {
-                    Some(request) => crate::ask_agent::run_for(app, request, id, |app| app.execute(id, params)),
-                    None => Err("`request` is an Ask Agent request id".into()),
-                },
-            };
+            let r = execute_control(app, req, id, params);
             match r {
                 Ok(v) => ok(v),
                 Err(e) => err(e),
@@ -254,7 +291,7 @@ pub fn handle(app: &mut WordApp, ctx: &egui::Context, req: &ControlRequest) -> O
         }
         other => {
             // Anything else: a command id.
-            match app.execute(other, p.clone()) {
+            match execute_control(app, req, other, p.clone()) {
                 Ok(v) => ok(v),
                 Err(e) => err(e),
             }

@@ -5044,3 +5044,12 @@ fn forced_tracking_records_revisions_without_touching_the_setting() {
     run(&mut s, "review.acceptAll", json!({}));
     assert_eq!(text(&s), "Kilns fire stoneware. More.");
 }
+
+#[test]
+fn connected_control_cannot_accept_through_nested_macro() {
+    let mut s = Session::new(wordcraft_doc::Document::new());
+    s.human_review_only = true;
+    let result =
+        s.run("tools.macros", &serde_json::json!({"define":{"name":"accept", "steps":[{"command":"review.acceptAll","params":{}}]}, "run":"accept"}));
+    assert!(result.unwrap_err().to_string().contains("HUMAN_REVIEW_REQUIRED"));
+}

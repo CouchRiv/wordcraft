@@ -171,3 +171,20 @@ WordCraft calls no model and holds no key: the agent is whatever the person conn
 `reply_to_request` ([MCP server](mcp.md#ask-agent)).
 
 Quick actions also include **Final polish** under More (grammar, clarity and consistency, preserving facts, names, numbers, meaning and structure without additions), and **Reading level** with General public, Secondary school and Expert. All four use `apply: "replace"`.
+
+### Common Ask Agent contract
+
+See [the common contract](ask-agent-contract.md). The selection transport remains additive:
+`agent.listen` uses `timeoutMs`, and `agent.reply` uses `text` and `done`. Requests now
+also expose `status` (`pending` / `working` / `ready` / `failed` / `cancelled`), explicit
+`scope`, top-level `language`, `author`, and opaque `document.id` / `document.revision`.
+Legacy inspection `state` names `waiting` and `answered` remain aliases.
+
+Claims belong to authenticated connections, never display names. A different connection
+cannot reply or run a native command for a claim. Untagged native commands automatically
+use that connection's active claim; an unowned mutation while requests are unresolved is
+refused. Person-only review and synthetic UI review paths return `HUMAN_REVIEW_REQUIRED`.
+Lost control replies are ambiguous and never replayed. The queue and instruction drafts
+are session-only, capped at 20 retained requests without eviction of unresolved results.
+The person explicitly chooses Selection or Document in the bubble before Send. Actions
+carry all six common keys, including scope and their full instruction.
