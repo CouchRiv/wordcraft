@@ -106,11 +106,13 @@ pub fn combo(m: Modifiers, key: &str, with_shift: bool) -> String {
 
 /// Shortcuts for interface commands (`ui.*`), which aren't in the engine's keymap: Alt+Q moves
 /// to "Tell me" command search, as in Word for Windows (#819). Not on macOS, where Option+Q types
-/// a character.
+/// a character. Ctrl+Shift+O (⌘⇧O) is Ask Agent… ([`crate::ask_agent::SHORTCUT`]), a key Word
+/// leaves free.
 fn ui_shortcut(key: Key, m: Modifiers) -> Option<(&'static str, Value)> {
     let alt_only = m.alt && !m.command && !m.ctrl && !m.mac_cmd && !m.shift;
     match key {
         Key::Q if alt_only && !cfg!(target_os = "macos") => Some(("ui.dialog", json!({"name": "commands"}))),
+        Key::O if m.command && m.shift && !m.alt => Some(("ui.askAgent", json!({}))),
         _ => None,
     }
 }

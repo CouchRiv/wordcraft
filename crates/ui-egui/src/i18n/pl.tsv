@@ -2468,3 +2468,37 @@ preview	Title	Tytuł
 	Typing	Pisanie
 	Search	Wyszukaj
 	Title Bar	Pasek tytułu
+
+# Ask Agent (Help › Agents, the selection chip and bubble)
+
+	Ask Agent	Zapytaj agenta
+
+	Ask\nAgent	Zapytaj\nagenta
+
+	Ask Agent…	Zapytaj agenta…
+
+	Ask agent to…	Poproś agenta, aby…
+
+	Send	Wyślij
+
+	Dismiss	Ukryj
+
+	Done.	Gotowe.
+
+	Cancelled	Anulowano
+
+	Waiting for the agent…	Czekam na agenta…
+
+	The agent is working…	Agent pracuje…
+
+	No agent is listening right now.	Żaden agent teraz nie nasłuchuje.
+
+	No text is selected: the agent gets the caret's place.	Nie zaznaczono tekstu: agent otrzyma położenie kursora.
+
+	The agent gets the selected text ({count} characters).	Agent otrzyma zaznaczony tekst (znaki: {count}).
+
+	Ask Agent isn't available in the web app: it needs the desktop app's control channel	Funkcja Zapytaj agenta nie działa w aplikacji internetowej: wymaga kanału sterowania aplikacji klasycznej
+
+	Ask Agent needs the control channel: start WordCraft with `--control 7981`, then connect your agent with `wordcraft-cli mcp --connect 127.0.0.1:7981`	Funkcja Zapytaj agenta wymaga kanału sterowania: uruchom WordCraft z `--control 7981`, a potem połącz agenta poleceniem `wordcraft-cli mcp --connect 127.0.0.1:7981`
+
+	No agent is listening: run `wordcraft-cli mcp --connect 127.0.0.1:{port}` in your agent and ask it to wait for WordCraft requests	Żaden agent nie nasłuchuje: uruchom `wordcraft-cli mcp --connect 127.0.0.1:{port}` w swoim agencie i poproś go, aby czekał na prośby z WordCraft

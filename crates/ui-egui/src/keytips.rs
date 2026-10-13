@@ -335,7 +335,7 @@ fn controls(tab: &str) -> Vec<Control> {
             c("Split", "view.split"),
             c("Macros", "tools.macros"),
         ],
-        "Help" => vec![d("Help", "about"), c("Community Discord", "ui.discord"), d("Commands", "commands")],
+        "Help" => vec![d("Help", "about"), c("Community Discord", "ui.discord"), d("Commands", "commands"), c("Ask Agent", "ui.askAgent")],
         "Table Design" => {
             vec![m("Shading", "table.shading"), m("Borders", "table.borders"), c("Border Painter", "table.borderPainter")]
         }
