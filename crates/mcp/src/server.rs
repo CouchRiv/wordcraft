@@ -26,7 +26,8 @@ parameters with list_commands and run them with execute (or several with batch).
 \"Hello\" → execute text.newParagraph → execute para.style {style:\"Heading 1\"} → select_text {text:\"Hello\"} → \
 execute format.bold → inspect_document to verify → render_page to look at the result → save {path:\"out.docx\"}. \
 Ask Agent: when connected to the app, wait_for_request returns what the person asks from the WordCraft window \
-(an instruction about their selection); do it, then answer with reply_to_request.";
+(an instruction about their selection); send a short progress note with reply_to_request (done: false) at once, do it, \
+then answer with reply_to_request.";
 
 /// Resource URIs.
 pub const DOC_URI: &str = "wordcraft://document";

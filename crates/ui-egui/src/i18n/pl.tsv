@@ -2487,9 +2487,7 @@ preview	Title	Tytuł
 
 	Cancelled	Anulowano
 
-	Waiting for the agent…	Czekam na agenta…
 
-	The agent is working…	Agent pracuje…
 
 	No agent is listening right now.	Żaden agent teraz nie nasłuchuje.
 
@@ -2502,3 +2500,8 @@ preview	Title	Tytuł
 	Ask Agent needs the control channel: start WordCraft with `--control 7981`, then connect your agent with `wordcraft-cli mcp --connect 127.0.0.1:7981`	Funkcja Zapytaj agenta wymaga kanału sterowania: uruchom WordCraft z `--control 7981`, a potem połącz agenta poleceniem `wordcraft-cli mcp --connect 127.0.0.1:7981`
 
 	No agent is listening: run `wordcraft-cli mcp --connect 127.0.0.1:{port}` in your agent and ask it to wait for WordCraft requests	Żaden agent nie nasłuchuje: uruchom `wordcraft-cli mcp --connect 127.0.0.1:{port}` w swoim agencie i poproś go, aby czekał na prośby z WordCraft
+	Sent to your agent…	Wysłano do agenta…
+	Waiting for an agent…	Czekam na agenta…
+	Your agent is working…	Agent pracuje…
+	{seconds} s	{seconds} s
+	Enter to send, Shift+Enter for a new line	Enter wysyła, Shift+Enter dodaje nowy wiersz

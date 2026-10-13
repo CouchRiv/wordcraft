@@ -39,7 +39,9 @@ const KEEP: usize = 20;
 /// Requests shown in the window at once (the newest).
 const SHOWN: usize = 3;
 /// Width of the instruction box and the requests card.
-const WIDTH: f32 = 320.0;
+const WIDTH: f32 = 340.0;
+/// Width for a long answer, which wraps rather than being cut.
+const WIDE: f32 = 440.0;
 
 /// Where a request is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,6 +84,8 @@ pub struct Request {
     pub reply: String,
     /// When an agent took it (`now_ms`).
     taken_ms: f64,
+    /// When the person asked (`now_ms`), for the time shown while it runs.
+    asked_ms: f64,
 }
 
 impl Request {
@@ -142,7 +146,16 @@ impl AgentHub {
             let mut s = self.lock();
             let id = s.next_id;
             s.next_id = s.next_id.saturating_add(1);
-            s.requests.push_back(Request { id, instruction, selection, document, state: State::Waiting, reply: String::new(), taken_ms: 0.0 });
+            s.requests.push_back(Request {
+                id,
+                instruction,
+                selection,
+                document,
+                state: State::Waiting,
+                reply: String::new(),
+                taken_ms: 0.0,
+                asked_ms: crate::now_ms(),
+            });
             // Drop the oldest closed requests, then (only past twice the limit) the oldest.
             while s.requests.len() > KEEP {
                 match s.requests.iter().position(|r| !r.state.open()) {
@@ -416,8 +429,9 @@ fn selection(app: &WordApp) -> Value {
     })
 }
 
-/// The document as an agent gets it: its file name, else its title (never translated text), and
-/// the language of the selected text (the document's when the selection mixes languages).
+/// The document as an agent gets it: its file name, else its title, else the window's name for a
+/// new document (`Document1`, never translated text); whether it is saved to a file; and the
+/// language of the selected text (the document's when the selection mixes languages).
 fn document(app: &mut WordApp) -> Value {
     let lang = app.session.run("format.state", &json!({})).ok().and_then(|v| v.get("lang").and_then(Value::as_str).map(str::to_string));
     let s = &app.session;
@@ -426,8 +440,9 @@ fn document(app: &mut WordApp) -> Value {
         .as_ref()
         .and_then(|p| p.file_name())
         .map(|n| n.to_string_lossy().to_string())
-        .or_else(|| (!s.doc.core.title.trim().is_empty()).then(|| s.doc.core.title.clone()));
-    json!({"title": title, "language": lang.or_else(|| s.doc.styles.default_chr.lang.clone())})
+        .or_else(|| (!s.doc.core.title.trim().is_empty()).then(|| s.doc.core.title.clone()))
+        .unwrap_or_else(|| "Document1".into());
+    json!({"title": title, "saved": s.path.is_some(), "language": lang.or_else(|| s.doc.styles.default_chr.lang.clone())})
 }
 
 /// `ui.askAgent`. No params: open the bubble at the selection (refused, with the reason, when no
@@ -595,24 +610,21 @@ fn show_bubble(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) -> Option
         return None;
     }
     let at = crate::canvas::pos_screen(app, &anchor);
-    let pos = bubble_pos(at, vec2(WIDTH, 170.0), viewport)?;
+    let width = if current.as_ref().is_some_and(|r| r.reply.chars().count() > 160) { WIDE } else { WIDTH };
+    let pos = bubble_pos(at, vec2(width, 170.0), viewport)?;
     let chars = app.session.selected_text().chars().count();
     let present = hub.as_ref().is_some_and(AgentHub::agent_present);
     let animate = app.animations_on();
     let edit_id = egui::Id::new("wc_ask_agent_text");
     let typing = ctx.memory(|m| m.has_focus(edit_id));
     let mut act = BubbleAct::None;
+    let t = Tokens::get(ctx);
     let shown = egui::Area::new(egui::Id::new("wc_ask_agent")).order(Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
-        egui::Frame::popup(ui.style()).show(ui, |ui| {
-            ui.set_width(WIDTH);
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(tl!("Ask Agent")).strong());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("×").on_hover_text(tl!("Close")).clicked() {
-                        act = BubbleAct::Close;
-                    }
-                });
-            });
+        card(&t).show(ui, |ui| {
+            ui.set_width(width);
+            if header(ui, &t) {
+                act = BubbleAct::Close;
+            }
             match &current {
                 None => {
                     let about = if chars == 0 {
@@ -621,10 +633,16 @@ fn show_bubble(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) -> Option
                         crate::i18n::fmt(tl!("The agent gets the selected text ({count} characters)."), &[("count", &chars.to_string())])
                     };
                     ui.label(egui::RichText::new(about).small().weak());
-                    // Enter sends, Shift+Enter starts a new line.
+                    // Enter sends, Shift+Enter starts a new line, Up in an empty box brings back the
+                    // last instruction.
                     let enter = typing && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
                     let history = app.ask_agent.history.clone();
+                    let empty = app.ask_agent.bubble.as_ref().is_some_and(|b| b.text.is_empty());
+                    let up = typing && empty && !history.is_empty() && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowUp));
                     let Some(b) = app.ask_agent.bubble.as_mut() else { return };
+                    if let (true, Some(last)) = (up, history.first()) {
+                        b.text = last.clone();
+                    }
                     let edit = ui.add(
                         egui::TextEdit::multiline(&mut b.text)
                             .id(edit_id)
@@ -636,6 +654,15 @@ fn show_bubble(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) -> Option
                         edit.request_focus();
                         b.focused = true;
                     }
+                    if up {
+                        // The caret at the end of the recalled text.
+                        let end = b.text.chars().count();
+                        if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), edit_id) {
+                            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(end))));
+                            state.store(ui.ctx(), edit_id);
+                        }
+                    }
+                    ui.label(egui::RichText::new(tl!("Enter to send, Shift+Enter for a new line")).small().color(t.text_dim));
                     let has_text = !b.text.trim().is_empty();
                     if !has_text && !history.is_empty() {
                         ui.label(egui::RichText::new(tl!("Recent")).small().weak());
@@ -657,8 +684,8 @@ fn show_bubble(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) -> Option
                     });
                 }
                 Some(r) => {
-                    let t = Tokens::get(ui.ctx());
-                    ui.add(egui::Label::new(egui::RichText::new(&r.instruction).small().color(t.text_dim)).truncate());
+                    // The instruction, in grey, then where it stands.
+                    ui.add(egui::Label::new(egui::RichText::new(&r.instruction).small().color(t.text_dim)).truncate()).on_hover_text(&r.instruction);
                     status(ui, r, present, animate);
                     ui.horizontal(|ui| {
                         if r.state.open() {
@@ -717,32 +744,85 @@ enum BubbleAct {
     Dismiss(u64),
 }
 
-/// A request's state: a spinner while it waits or the agent works (a still one with animations
-/// off), the agent's text, or Cancelled.
+/// A request's state, live: "Sent to your agent" the moment it is sent, "Your agent is working"
+/// as soon as the agent has it, with a spinner (a still line with animations off) and the time
+/// since it was sent; the agent's latest progress note; then its answer, whole (it wraps, and
+/// scrolls when long), or Cancelled.
 fn status(ui: &mut egui::Ui, r: &Request, present: bool, animate: bool) {
+    let t = Tokens::get(ui.ctx());
+    let secs = ((crate::now_ms() - r.asked_ms) / 1000.0).max(0.0) as u64;
     let busy = |ui: &mut egui::Ui, text: &str| {
         ui.horizontal(|ui| {
             if animate {
-                ui.add(egui::Spinner::new().size(12.0));
+                ui.add(egui::Spinner::new().size(12.0).color(t.accent));
+            } else {
+                // The seconds still count.
+                ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
             }
             ui.label(text);
+            ui.label(egui::RichText::new(crate::i18n::fmt(tl!("{seconds} s"), &[("seconds", &secs.to_string())])).small().color(t.text_dim));
         });
     };
     match r.state {
+        State::Waiting if present => busy(ui, tl!("Sent to your agent…")),
         State::Waiting => {
-            busy(ui, tl!("Waiting for the agent…"));
-            if !present {
-                ui.label(egui::RichText::new(tl!("No agent is listening right now.")).small().weak());
+            busy(ui, tl!("Waiting for an agent…"));
+            ui.label(egui::RichText::new(tl!("No agent is listening right now.")).small().weak());
+        }
+        State::Working => {
+            busy(ui, tl!("Your agent is working…"));
+            // Its latest progress note.
+            if !r.reply.is_empty() {
+                ui.add(egui::Label::new(r.reply.as_str()).wrap());
             }
         }
-        State::Working if r.reply.is_empty() => busy(ui, tl!("The agent is working…")),
-        // A progress note while the agent works.
-        State::Working => busy(ui, &r.reply),
-        // The agent's own words: shown as it wrote them, selectable to copy.
+        // The agent's own words: shown whole, as it wrote them, selectable to copy.
         State::Answered if r.reply.is_empty() => drop(ui.label(tl!("Done."))),
-        State::Answered => drop(ui.add(egui::Label::new(r.reply.as_str()).selectable(true).wrap())),
+        State::Answered => {
+            egui::ScrollArea::vertical().id_salt(("wc_ask_agent_reply", r.id)).max_height(260.0).auto_shrink([false, true]).show(ui, |ui| {
+                ui.add(egui::Label::new(r.reply.as_str()).selectable(true).wrap());
+            });
+        }
         State::Cancelled => drop(ui.label(egui::RichText::new(tl!("Cancelled")).weak())),
     }
+}
+
+/// The bubble's and the card's look: the mini toolbar's (menu fill, strong border, 6 pt corners,
+/// a soft shadow), with room inside.
+fn card(t: &Tokens) -> egui::Frame {
+    egui::Frame::new()
+        .fill(t.menu)
+        .stroke(egui::Stroke::new(1.0, t.border_strong))
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::same(10))
+        .shadow(egui::Shadow { offset: [0, 2], blur: 8, spread: 0, color: t.page_shadow })
+}
+
+/// The bubble's title row: the Ask Agent icon and name, and a close button. True when the close
+/// button was clicked.
+fn header(ui: &mut egui::Ui, t: &Tokens) -> bool {
+    ui.horizontal(|ui| {
+        let (icon, _) = ui.allocate_exact_size(vec2(16.0, 16.0), egui::Sense::hover());
+        crate::icons::paint(ui.painter(), icon, "askAgent", t.icon, t.accent);
+        ui.label(egui::RichText::new(tl!("Ask Agent")).font(crate::theme::semibold(12.5)).color(t.text));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| close_button(ui, t)).inner
+    })
+    .inner
+}
+
+/// A small × like the panes' close buttons: a hover square and two strokes.
+fn close_button(ui: &mut egui::Ui, t: &Tokens) -> bool {
+    let (r, resp) = ui.allocate_exact_size(vec2(18.0, 18.0), egui::Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(r, egui::CornerRadius::same(4), t.hover);
+    }
+    let (c, d) = (r.center(), 3.5);
+    let stroke = egui::Stroke::new(1.3, t.icon);
+    ui.painter().line_segment([c + vec2(-d, -d), c + vec2(d, d)], stroke);
+    ui.painter().line_segment([c + vec2(-d, d), c + vec2(d, -d)], stroke);
+    let label = tl!("Close");
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    resp.on_hover_text(label).clicked()
 }
 
 /// The requests the bubble doesn't show, newest last, in the canvas's bottom-right corner.
@@ -760,9 +840,12 @@ fn show_requests(app: &mut WordApp, ctx: &egui::Context, viewport: Rect, in_bubb
         .pivot(Align2::RIGHT_BOTTOM)
         .fixed_pos(viewport.right_bottom() - vec2(16.0, 16.0))
         .show(ctx, |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
+            card(&t).show(ui, |ui| {
                 ui.set_width(WIDTH);
-                ui.label(egui::RichText::new(tl!("Ask Agent")).strong());
+                let mut close = false;
+                if header(ui, &t) {
+                    close = true;
+                }
                 for r in requests.iter().rev().take(SHOWN).rev() {
                     ui.separator();
                     ui.add(egui::Label::new(egui::RichText::new(&r.instruction).small().color(t.text_dim)).truncate());
@@ -772,6 +855,12 @@ fn show_requests(app: &mut WordApp, ctx: &egui::Context, viewport: Rect, in_bubb
                             hub.cancel(r.id);
                         }
                     } else if ui.small_button(tl!("Dismiss")).clicked() {
+                        hub.dismiss(r.id);
+                    }
+                }
+                // Closing the card puts away the answered and cancelled requests; open ones stay.
+                if close {
+                    for r in &requests {
                         hub.dismiss(r.id);
                     }
                 }
@@ -1028,13 +1117,19 @@ mod tests {
         h.event(egui::Event::Text("make it formal".into()));
         steps(&mut h);
         key(&mut h, Key::Enter, Modifiers::NONE);
+        // Sent: the bubble says so at once, before any agent has it.
+        assert!(h.query_by_label_contains("Sent to your agent").is_some(), "immediate feedback");
         let r = hub.listen(Duration::from_millis(10), || true).expect("the request is queued");
         assert_eq!(r.instruction, "make it formal");
         assert_eq!(r.selection["text"], "the clay slowly");
-        assert_eq!(r.document["language"], "en-US");
+        assert_eq!(r.document, json!({"title": "Document1", "saved": false, "language": "en-US"}), "a new document goes by the window's name");
         assert_eq!(h.state().ask_agent.history, vec!["make it formal".to_string()]);
         steps(&mut h);
-        assert!(h.query_by_label_contains("The agent is working").is_some(), "the bubble follows the request");
+        assert!(h.query_by_label_contains("Your agent is working").is_some(), "the bubble says the agent has it");
+        // A progress note shows while the agent works.
+        hub.reply(r.id, "Rewriting…", false).unwrap();
+        steps(&mut h);
+        assert!(h.query_by_label_contains("Rewriting…").is_some(), "the latest progress note");
         hub.reply(r.id, "Rewrote it in a formal register.", true).unwrap();
         steps(&mut h);
         assert!(h.query_by_label_contains("Rewrote it in a formal register.").is_some(), "the answer shows in the bubble");
@@ -1101,5 +1196,46 @@ mod tests {
         assert_eq!(a.run("ui.askAgent", json!({"cancel": id})).unwrap()["cancelled"], true);
         assert!(a.run("ui.askAgent", json!({"instruction": 5})).is_err());
         assert!(a.run("ui.askAgent", json!({"cancel": "x"})).is_err());
+    }
+
+    /// Keyboard: Up in the empty box brings back the last instruction; the chip shows in the very
+    /// frame the selection is made.
+    #[test]
+    fn up_recalls_the_last_instruction_and_the_chip_comes_at_once() {
+        let hub = AgentHub::new(7985, None);
+        hub.listen(Duration::from_millis(1), || true);
+        let mut h = window(Some(hub.clone()));
+        h.state_mut().ask_agent.history = vec!["make it formal".into(), "older".into()];
+        h.state_mut().run("select.text", json!({"text": "Kilns"})).unwrap();
+        h.step();
+        assert!(chip(&h).is_some(), "one frame after the selection");
+        h.state_mut().run("ui.askAgent", json!({})).unwrap();
+        steps(&mut h);
+        key(&mut h, Key::ArrowUp, Modifiers::NONE);
+        assert_eq!(h.state().ask_agent.bubble.as_ref().map(|b| b.text.as_str()), Some("make it formal"));
+        key(&mut h, Key::Enter, Modifiers::NONE);
+        assert_eq!(hub.listen(Duration::from_millis(10), || true).map(|r| r.instruction), Some("make it formal".to_string()));
+    }
+
+    /// A waiting agent gets a request as soon as it is made: `agent.listen` is woken, it doesn't
+    /// poll or wait for the window's next frame.
+    #[test]
+    fn a_waiting_agent_gets_the_request_at_once() {
+        let hub = AgentHub::new(7985, None);
+        let agent = hub.clone();
+        let waiting = std::thread::spawn(move || {
+            let r = agent.listen(Duration::from_secs(20), || true);
+            (r, std::time::Instant::now())
+        });
+        while !hub.agent_present() {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        let asked = std::time::Instant::now();
+        hub.ask("go", json!({}), json!({})).unwrap();
+        let (r, got) = waiting.join().unwrap();
+        assert!(r.is_some());
+        let lag = got.duration_since(asked);
+        assert!(lag < Duration::from_millis(500), "woken in {lag:?}");
     }
 }

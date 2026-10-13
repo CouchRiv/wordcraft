@@ -110,7 +110,7 @@ WordCraft calls no model and holds no key: the agent is whatever the person conn
 
 | Method | Params | Result |
 |---|---|---|
-| `agent.listen` | `timeoutMs?` (default 30000, at most 60000) | the oldest waiting request, `{id, instruction, selection: {text, anchor, focus, truncated}, document: {title, language}}`, or `{none: true}` when none came in time |
+| `agent.listen` | `timeoutMs?` (default 30000, at most 60000) | the oldest waiting request, `{id, instruction, selection: {text, anchor, focus, truncated}, document: {title, saved, language}}`, or `{none: true}` when none came in time |
 | `agent.reply` | `id`, `text`, `done?` (default true) | `{id, shown: true, done}`, or `{id, cancelled: true}` when the person cancelled the request |
 
 - Both need the key, like every other method. They are answered on the connection's own thread
@@ -124,8 +124,12 @@ WordCraft calls no model and holds no key: the agent is whatever the person conn
 - `selection` is what was selected when the person asked (positions as below); they may have
   moved since, and `select.range {anchor, focus}` selects it again. `selection.text` is cut at
   100,000 bytes (`truncated`); `instruction` and `text` at 4,000 characters. `document.title` is
-  the file name, else the document's title, else null; `language` is the selection's language tag.
-- `done: false` shows `text` as a progress note and keeps the request open.
+  the file name, else the document's title, else the window's name for a new document
+  (`Document1`); `saved` says whether it has a file; `language` is the selection's language tag.
+- `done: false` shows `text` as a progress note and keeps the request open. The bubble says
+  "Sent to your agent" the moment the person sends, "Your agent is working" as soon as
+  `agent.listen` hands the request out, with the seconds since it was sent and the latest note: an
+  agent should send a short note (`"Rewriting…"`) right away, then its answer with `done: true`.
 - The selected text is document content: an agent should treat it as data, not as instructions.
 - `ui.askAgent` (a UI command, through `engine.execute`): no params opens the bubble at the
   selection (an error, with the reason, when no agent listens); `{"instruction": "…"}` queues a

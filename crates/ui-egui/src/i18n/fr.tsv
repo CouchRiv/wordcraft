@@ -2092,11 +2092,14 @@
 	Dismiss	Masquer
 	Done.	Terminé.
 	Cancelled	Annulée
-	Waiting for the agent…	En attente de l’agent…
-	The agent is working…	L’agent travaille…
 	No agent is listening right now.	Aucun agent n’écoute pour le moment.
 	No text is selected: the agent gets the caret's place.	Aucun texte n’est sélectionné : l’agent reçoit la position du curseur.
 	The agent gets the selected text ({count} characters).	L’agent reçoit le texte sélectionné ({count} caractères).
 	Ask Agent isn't available in the web app: it needs the desktop app's control channel	Demander à l’agent n’est pas disponible dans l’application web : il faut le canal de contrôle de l’application de bureau
 	Ask Agent needs the control channel: start WordCraft with `--control 7981`, then connect your agent with `wordcraft-cli mcp --connect 127.0.0.1:7981`	Demander à l’agent a besoin du canal de contrôle : lancez WordCraft avec `--control 7981`, puis connectez votre agent avec `wordcraft-cli mcp --connect 127.0.0.1:7981`
 	No agent is listening: run `wordcraft-cli mcp --connect 127.0.0.1:{port}` in your agent and ask it to wait for WordCraft requests	Aucun agent n’écoute : lancez `wordcraft-cli mcp --connect 127.0.0.1:{port}` dans votre agent et demandez-lui d’attendre les demandes de WordCraft
+	Sent to your agent…	Envoyé à votre agent…
+	Waiting for an agent…	En attente d’un agent…
+	Your agent is working…	Votre agent travaille…
+	{seconds} s	{seconds} s
+	Enter to send, Shift+Enter for a new line	Entrée pour envoyer, Maj+Entrée pour une nouvelle ligne

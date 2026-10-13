@@ -105,11 +105,12 @@ Ctrl+Shift+O) and type an instruction. Two tools carry it, for any MCP client:
 
 | Tool | What it does |
 |---|---|
-| `wait_for_request` | waits up to `timeout_s` (default 30, at most 60) for the next request: `{id, instruction, selection: {text, anchor, focus, truncated}, document: {title, language}}`, or `{none: true}` |
+| `wait_for_request` | waits up to `timeout_s` (default 30, at most 60) for the next request: `{id, instruction, selection: {text, anchor, focus, truncated}, document: {title, saved, language}}`, or `{none: true}` |
 | `reply_to_request` | `{id, text, done?}`: shows `text` in the bubble under the selection; `done: false` is a progress note that keeps the request open; a request the person cancelled answers `{cancelled: true}` |
 
-The agent's loop: `wait_for_request`, then the work with `execute`, `select_text`, `type_text`…,
-then `reply_to_request`, then `wait_for_request` again. In Claude Code, for example: "wait for my
+The agent's loop: `wait_for_request`; at once `reply_to_request {id, text: "Rewriting…", done:
+false}`, so the person sees the agent has it; the work with `execute`, `select_text`,
+`type_text`…; `reply_to_request` with the answer; `wait_for_request` again. In Claude Code, for example: "wait for my
 WordCraft requests and handle them". While `wait_for_request` waits this server answers nothing
 else, which is why the wait is short. The chip only shows while an agent listens, so the window
 never offers a button nobody answers. Without the app (`wordcraft-cli mcp`), both tools say how to
