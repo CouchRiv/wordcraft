@@ -138,7 +138,7 @@ fn peer_open(s: &TcpStream) -> bool {
 
 /// `agent.listen {timeoutMs?}` and `agent.reply {id, text, done?}` (Ask Agent): the
 /// reply line, and the request handed out (to put back if the reply can't be written).
-fn agent_method(agents: &AgentHub, method: &str, p: &Value, probe: &TcpStream) -> (Value, Option<u64>) {
+fn agent_method(agents: &AgentHub, method: &str, p: &Value, probe: &TcpStream, connection: u64) -> (Value, Option<u64>) {
     let err = |e: &str| json!({"ok": false, "error": e, "errorCode":"INVALID_PARAMS"});
     match method {
         "agent.listen" => {
@@ -151,6 +151,9 @@ fn agent_method(agents: &AgentHub, method: &str, p: &Value, probe: &TcpStream) -
             };
             if p.get("agent").is_some_and(|v| !v.is_string()) {
                 return (err("`agent` must be a string"), None);
+            }
+            if agents.connection_request(connection).is_some() {
+                return (json!({"ok":true,"result":{"none":true}}), None);
             }
             match agents.listen(Duration::from_millis(ms), || peer_open(probe)) {
                 Some(r) => (json!({"ok": true, "result": r.to_json()}), Some(r.id)),
@@ -339,7 +342,7 @@ fn serve(stream: TcpStream, tx: Sender<ControlRequest>, ctx: egui::Context, key:
             if valid_listen {
                 agents.connection_listening(connection, true);
             }
-            let (r, taken) = agent_method(agents, &method, &params, &probe);
+            let (r, taken) = agent_method(agents, &method, &params, &probe, connection);
             if valid_listen {
                 agents.connection_listening(connection, false);
             }
@@ -469,6 +472,18 @@ mod tests {
             let mut r = String::new();
             matches!(self.0.read_line(&mut r), Ok(0))
         }
+    }
+
+    #[test]
+    fn a_connection_finishes_its_claim_before_taking_another() {
+        let (port, _rx, h) = boot_agents(FIRST_REQUEST);
+        let first = h.ask("first", sel("x"), json!({})).unwrap();
+        let second = h.ask("second", sel("y"), json!({})).unwrap();
+        let mut c = authed(port);
+        assert_eq!(c.call(r#"{"method":"agent.listen","params":{"timeoutMs":0}}"#)["result"]["id"], first);
+        assert_eq!(c.call(r#"{"method":"agent.listen","params":{"timeoutMs":0}}"#)["result"]["none"], true);
+        assert_eq!(c.call(&json!({"method":"agent.reply","params":{"id":first,"text":"done"}}).to_string())["result"]["shown"], true);
+        assert_eq!(c.call(r#"{"method":"agent.listen","params":{"timeoutMs":0}}"#)["result"]["id"], second);
     }
 
     #[test]

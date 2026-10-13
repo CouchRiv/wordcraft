@@ -3,6 +3,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::Path;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -16,6 +17,29 @@ pub trait Backend {
     fn has_ui(&self) -> bool;
     /// Short human description ("headless", "connected to 127.0.0.1:7981").
     fn describe(&self) -> String;
+}
+
+/// The optional channel and normal MCP tools use one physical control connection.
+/// Listening uses short polls, so a pending listen cannot hold up tools for 30 seconds.
+#[derive(Clone)]
+pub struct SharedRemote(Arc<Mutex<Remote>>);
+
+impl SharedRemote {
+    pub fn new(remote: Remote) -> Self {
+        Self(Arc::new(Mutex::new(remote)))
+    }
+}
+
+impl Backend for SharedRemote {
+    fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).call(method, params)
+    }
+    fn has_ui(&self) -> bool {
+        true
+    }
+    fn describe(&self) -> String {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).describe()
+    }
 }
 
 /// Looks up the control key for an address (`HOST:PORT`).
@@ -217,6 +241,33 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{Receiver, channel};
+
+    #[test]
+    fn channel_and_tools_share_one_physical_control_connection() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let count = connections.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                count.fetch_add(1, Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    let mut writer = stream.try_clone().unwrap();
+                    for line in BufReader::new(stream).lines() {
+                        let req: Value = serde_json::from_str(&line.unwrap()).unwrap();
+                        let result = if req["method"] == "agent.listen" { json!({"id":7}) } else { json!({"id":7,"shown":true,"done":true}) };
+                        writeln!(writer, "{}", json!({"id":req["id"],"ok":true,"result":result})).unwrap();
+                    }
+                });
+            }
+        });
+        let remote = Remote::connect_with(&format!("127.0.0.1:{port}"), fixed_key("synthetic")).unwrap();
+        let mut channel = SharedRemote::new(remote);
+        let mut tools = channel.clone();
+        assert_eq!(channel.call("agent.listen", json!({"timeoutMs":500})).unwrap()["id"], 7);
+        assert_eq!(tools.call("agent.reply", json!({"id":7,"text":"done"})).unwrap()["shown"], true);
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn key_from_env_then_key_file() {
