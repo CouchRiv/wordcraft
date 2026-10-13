@@ -10,7 +10,7 @@ pub mod channel;
 pub mod server;
 pub mod tools;
 
-pub use backend::{Backend, Remote};
+pub use backend::{Backend, Remote, SharedRemote};
 pub use server::Server;
 
 use std::sync::Arc;

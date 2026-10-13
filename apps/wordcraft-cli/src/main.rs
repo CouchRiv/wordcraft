@@ -314,8 +314,7 @@ fn run(args: &[String]) -> Result<(), Failure> {
                         .into(),
                 );
             }
-            // Ask Agent state the `--channel` connection shares with the main one.
-            let mut agent_state = None;
+            let mut channel_backend = None;
             let backend: Box<dyn wordcraft_mcp::Backend> = match connect.clone() {
                 // The app's user name is the person's own setting; don't rewrite it from a flag.
                 Some(_) if author.is_some() => {
@@ -326,8 +325,13 @@ fn run(args: &[String]) -> Result<(), Failure> {
                     if let Some(w) = remote.key_warning() {
                         eprintln!("wordcraft-cli: {w}");
                     }
-                    agent_state = Some(remote.agent_state());
-                    Box::new(remote)
+                    if channel {
+                        let shared = wordcraft_mcp::SharedRemote::new(remote);
+                        channel_backend = Some(shared.clone());
+                        Box::new(shared)
+                    } else {
+                        Box::new(remote)
+                    }
                 }
                 None => {
                     let mut headless = wordcraft_mcp::Headless::default();
@@ -346,12 +350,7 @@ fn run(args: &[String]) -> Result<(), Failure> {
             };
             let mut server = wordcraft_mcp::Server::new(backend);
             let out = wordcraft_mcp::channel::SharedWriter::new(std::io::stdout());
-            if let (true, Some(addr)) = (channel, connect.as_deref()) {
-                // Its own connection, so tool calls are answered while it waits for requests.
-                let mut listener = wordcraft_mcp::Remote::connect(addr).map_err(|e| format!("can't reach the WordCraft app at {addr}: {e}"))?;
-                if let Some(state) = agent_state {
-                    listener = listener.sharing(state);
-                }
+            if let Some(listener) = channel_backend {
                 let ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 server = server.with_channel(ready.clone());
                 wordcraft_mcp::channel::spawn(Box::new(listener), out.clone(), ready);
