@@ -2508,7 +2508,6 @@ preview	Title	Tytuł
 # Ask Agent quick actions
 	Sent to {agent}…	Wysłano do: {agent}…
 	{agent} is working…	{agent} pracuje…
-	The agent's changes are tracked: accept or reject them on the Review tab.	Zmiany agenta są śledzone: zaakceptuj je lub odrzuć na karcie Recenzja.
 	Inserts the result after the selection	Wstawia wynik za zaznaczeniem
 	Answers in the bubble; changes nothing	Odpowiada w dymku, niczego nie zmienia
 	Replaces the selection; the change is tracked	Zastępuje zaznaczenie, zmiana jest śledzona
@@ -2530,3 +2529,19 @@ preview	Title	Tytuł
 	Summarize	Streść
 	Continue writing	Pisz dalej
 	Explain	Wyjaśnij
+# Ask Agent review: proposals, Accept, Discard, Retry
+	Accepted: the change is tracked as {author}.	Zaakceptowano: zmiana jest śledzona jako {author}.
+	Accepted the changes by {author}.	Zaakceptowano zmiany: {author}.
+	Nothing left to accept: the agent's changes were already accepted, rejected or undone.	Nie ma już nic do zaakceptowania: zmiany agenta zostały już zaakceptowane, odrzucone lub cofnięte.
+	Discarded: the changes by {author} are rejected.	Porzucono: zmiany ({author}) zostały odrzucone.
+	The text this request was about has changed since: select it again and ask again.	Tekst, którego dotyczyła prośba, zmienił się: zaznacz go ponownie i zapytaj jeszcze raz.
+	The agent's changes are tracked: Accept keeps them, Discard rejects them.	Zmiany agenta są śledzone: Zaakceptuj je zachowuje, Porzuć je odrzuca.
+	Discard	Porzuć
+	Retry	Ponów
+	Ask again: the same request, a new answer	Zapytaj ponownie: ta sama prośba, nowa odpowiedź
+	Put this text in the document, as a tracked change by {author}	Wstaw ten tekst do dokumentu jako śledzoną zmianę ({author})
+	Drop this proposal; the document doesn't change	Porzuć tę propozycję; dokument się nie zmieni
+	Make the agent's tracked changes final	Zatwierdź śledzone zmiany agenta
+	Reject the agent's tracked changes	Odrzuć śledzone zmiany agenta
+	Enter	Enter
+	Esc	Esc

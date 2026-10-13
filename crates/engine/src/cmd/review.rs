@@ -1,5 +1,7 @@
 //! Review tab: comments, track changes, word count, spelling (via the proofing hook).
 
+use std::collections::BTreeSet;
+
 use serde_json::{Value, json};
 use wordcraft_doc::para::InlineObject;
 use wordcraft_doc::{Comment, Paragraph, PartKind, Pos, StoryRef, para_block};
@@ -30,8 +32,8 @@ pub fn specs() -> Vec<CommandSpec> {
         .key("Mod+Shift+E"),
         CommandSpec::new("review.acceptAll", "Accept All Changes", "Review › Changes", |s, _| resolve_all(s, true)),
         CommandSpec::new("review.rejectAll", "Reject All Changes", "Review › Changes", |s, _| resolve_all(s, false)),
-        CommandSpec::new("review.accept", "Accept", "Review › Changes", |s, _| resolve_sel(s, true)),
-        CommandSpec::new("review.reject", "Reject", "Review › Changes", |s, _| resolve_sel(s, false)),
+        CommandSpec::new("review.accept", "Accept", "Review › Changes", |s, v| resolve(s, v, true)).params(REVISIONS_PARAMS),
+        CommandSpec::new("review.reject", "Reject", "Review › Changes", |s, v| resolve(s, v, false)).params(REVISIONS_PARAMS),
         CommandSpec::new("review.nextChange", "Next Change", "Review › Changes", |s, _| nav_change(s, 1)).pure(),
         CommandSpec::new("review.previousChange", "Previous Change", "Review › Changes", |s, _| nav_change(s, -1)).pure(),
         CommandSpec::new("review.markup", "Display for Review", "Review › Tracking", |s, v| {
@@ -440,6 +442,112 @@ fn resolve_all(s: &mut Session, accept: bool) -> CmdResult {
     sel_result(s)
 }
 
+const REVISIONS_PARAMS: &str =
+    r#"{"revisions"?: [n] (revision ids, as review.changes lists them: exactly those changes, wherever they are; omit for the selection's)}"#;
+
+/// Most revision ids one `review.accept {revisions}` takes.
+const MAX_REVISION_IDS: usize = 100_000;
+
+/// Accept or Reject: the changes of the revisions `revisions` lists, else the selection's.
+fn resolve(s: &mut Session, v: &Value, accept: bool) -> CmdResult {
+    match v.get("revisions") {
+        None | Some(Value::Null) => resolve_sel(s, accept),
+        Some(Value::Array(ids)) => {
+            let ids: BTreeSet<u32> = ids.iter().take(MAX_REVISION_IDS).filter_map(|id| id.as_u64().and_then(|id| u32::try_from(id).ok())).collect();
+            resolve_ids(s, &ids, accept)
+        }
+        Some(_) => Err(CmdError::Params("`revisions` is a list of revision ids (review.changes lists them)".into())),
+    }
+}
+
+/// Accept or reject exactly the changes of the revisions `ids`, in every story (an Ask Agent
+/// request's, for example): their insertions and deletions, paragraph marks and formatting
+/// changes. Changes of other revisions, by anyone, stay as they are, even in the same text.
+/// Refused, changing nothing, when none of them is left in the document.
+fn resolve_ids(s: &mut Session, ids: &BTreeSet<u32>, accept: bool) -> CmdResult {
+    let stories: Vec<StoryRef> = std::iter::once(StoryRef::Body).chain(s.doc.parts.keys().map(|k| StoryRef::Part(*k))).collect();
+    let mut found = false;
+    for st in stories {
+        for path in s.doc.para_paths(st).into_iter().rev() {
+            found |= resolve_para_ids(s, st, &path, ids, accept)?;
+        }
+    }
+    // Tables, rows, cells and sections.
+    found |= fmt_revisions::resolve_containers_of(&mut s.doc.body, ids, accept, 0);
+    for part in s.doc.parts.values_mut() {
+        found |= fmt_revisions::resolve_containers_of(&mut part.blocks, ids, accept, 0);
+    }
+    if s.doc.last_section.fmt_change.as_ref().is_some_and(|c| ids.contains(&c.rev)) {
+        fmt_revisions::resolve_section(&mut s.doc.last_section, accept);
+        found = true;
+    }
+    if !found {
+        return Err(CmdError::Failed("none of these revisions is in the document: they were accepted or rejected already".into()));
+    }
+    s.clamp_selection();
+    sel_result(s)
+}
+
+/// [`resolve_ids`] in one paragraph: its runs, its own formatting and its mark. Whether it had any
+/// of those changes.
+fn resolve_para_ids(s: &mut Session, story: StoryRef, path: &wordcraft_doc::Path, ids: &BTreeSet<u32>, accept: bool) -> Result<bool, CmdError> {
+    let mine = |rev: Option<u32>| rev.is_some_and(|r| ids.contains(&r));
+    let para = s.doc.para_mut(story, path)?;
+    let mut found = false;
+    if para.props.fmt_change.as_ref().is_some_and(|c| ids.contains(&c.rev)) || para.props.num_change.as_ref().is_some_and(|c| ids.contains(&c.rev)) {
+        fmt_revisions::resolve_para(&mut para.props, accept);
+        para.touch();
+        found = true;
+    }
+    let ranges: Vec<(usize, usize, bool, bool, bool)> = para
+        .run_ranges()
+        .map(|(r, c)| (r.start, r.end, mine(c.ins), mine(c.del), c.fmt_change.as_ref().is_some_and(|f| ids.contains(&f.rev))))
+        .filter(|(_, _, ins, del, fmt)| *ins || *del || *fmt)
+        .collect();
+    found |= !ranges.is_empty();
+    for (a, b, ins, del, fmt) in ranges.into_iter().rev() {
+        // An accepted deletion or a rejected insertion takes the text away (whoever else marked it).
+        if (del && accept) || (ins && !accept) {
+            para.delete(a, b)?;
+        } else {
+            para.format(a, b, &|c| {
+                if ins {
+                    c.ins = None;
+                }
+                if del {
+                    c.del = None;
+                }
+                if fmt {
+                    fmt_revisions::resolve_char(c, accept);
+                }
+            })?;
+        }
+    }
+    if para.mark.fmt_change.as_ref().is_some_and(|c| ids.contains(&c.rev)) {
+        fmt_revisions::resolve_char(&mut para.mark, accept);
+        para.touch();
+        found = true;
+    }
+    let (ins, del) = (mine(para.mark.ins), mine(para.mark.del));
+    if !ins && !del {
+        return Ok(found);
+    }
+    // As in `resolve_para`: the mark goes (the next paragraph joins this one) when its deletion is
+    // accepted or its insertion rejected; a story's or cell's last mark just stops being a change.
+    if ((del && accept) || (ins && !accept)) && super::join_next_para(s, story, path)? {
+        return Ok(true);
+    }
+    let para = s.doc.para_mut(story, path)?;
+    if ins {
+        para.mark.ins = None;
+    }
+    if del {
+        para.mark.del = None;
+    }
+    para.touch();
+    Ok(true)
+}
+
 fn resolve_sel(s: &mut Session, accept: bool) -> CmdResult {
     let (a, b) = s.sel.ordered();
     // A caret right before a tracked paragraph mark (and no tracked text around it): that mark.
@@ -723,7 +831,7 @@ fn list_changes(s: &mut Session, _: &Value) -> CmdResult {
             .map(|c| {
                 let rev = c.rev.and_then(|r| s.doc.revisions.get(r as usize));
                 let mut v = json!({
-                    "kind": c.kind, "start": pos_json(&c.a), "end": pos_json(&c.b),
+                    "kind": c.kind, "revision": c.rev, "start": pos_json(&c.a), "end": pos_json(&c.b),
                     "text": s.doc.copy_range(&c.a, &c.b).plain_text(),
                     "author": rev.map(|r| r.author.clone()), "date": rev.map(|r| r.date.clone()),
                 });

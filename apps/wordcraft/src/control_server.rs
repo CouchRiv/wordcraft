@@ -16,7 +16,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use wordcraft_ui_egui::ask_agent::{DEFAULT_LISTEN_MS, MAX_LISTEN_MS};
+use wordcraft_ui_egui::ask_agent::{DEFAULT_LISTEN_MS, MAX_LISTEN_MS, Proposal};
 use wordcraft_ui_egui::{AgentHub, ControlRequest};
 
 /// Longer request lines are refused (and the connection closed).
@@ -136,7 +136,8 @@ fn peer_open(s: &TcpStream) -> bool {
     }
 }
 
-/// `agent.listen {timeoutMs?, agent?}` and `agent.reply {id, text, done?}` (Ask Agent): the
+/// `agent.listen {timeoutMs?, agent?}` and `agent.reply {id, text?, proposal?, format?, done?}`
+/// (Ask Agent): the
 /// reply line, and the request handed out (to put back if the reply can't be written).
 fn agent_method(agents: &AgentHub, method: &str, p: &Value, probe: &TcpStream) -> (Value, Option<u64>) {
     let err = |e: &str| json!({"ok": false, "error": e});
@@ -157,9 +158,16 @@ fn agent_method(agents: &AgentHub, method: &str, p: &Value, probe: &TcpStream) -
         }
         _ => {
             let Some(id) = p.get("id").and_then(Value::as_u64) else { return (err("missing `id` (the request's id from agent.listen)"), None) };
-            let Some(text) = p.get("text").and_then(Value::as_str) else { return (err("missing `text` (what to show in the window)"), None) };
+            let proposal = match Proposal::from_params(p) {
+                Ok(proposal) => proposal,
+                Err(e) => return (err(&e), None),
+            };
+            let text = p.get("text").and_then(Value::as_str);
+            if text.is_none() && proposal.is_none() {
+                return (err("missing `text` (what to show in the window) or `proposal` (the text to put in the document)"), None);
+            }
             let done = p.get("done").and_then(Value::as_bool).unwrap_or(true);
-            match agents.reply(id, text, done) {
+            match agents.answer(id, text, proposal, done) {
                 Ok(v) => (json!({"ok": true, "result": v}), None),
                 Err(e) => (err(&e), None),
             }
@@ -730,5 +738,35 @@ mod tests {
         let taken = agents.request(id).unwrap();
         assert_eq!((taken.agent.as_deref(), taken.author()), (Some("editor bot"), "Agent (editor bot)".to_string()));
         assert_eq!(agents.agent_name().as_deref(), Some("editor bot"));
+    }
+
+    #[test]
+    fn agent_reply_streams_a_proposal() {
+        let (port, _rx, agents) = boot_agents(FIRST_REQUEST);
+        let id = agents.ask("shorten", sel("Kilns fire clay slowly over many hours."), json!({})).unwrap();
+        let mut c = authed(port);
+        c.call(r#"{"id":1,"method":"agent.listen","params":{"timeoutMs":1000}}"#);
+        // Partial proposals replace each other; `text` is optional with one.
+        let r = c.call(&format!(r#"{{"id":2,"method":"agent.reply","params":{{"id":{id},"proposal":"Kilns fire","done":false}}}}"#));
+        assert_eq!(r["result"]["done"], false, "{r}");
+        c.call(&format!(r#"{{"id":3,"method":"agent.reply","params":{{"id":{id},"proposal":"Kilns fire clay slowly.","done":false}}}}"#));
+        let p = agents.request(id).unwrap().proposal.unwrap();
+        assert_eq!((p.text.as_str(), p.markdown), ("Kilns fire clay slowly.", false));
+        let r = c.call(&format!(r#"{{"id":4,"method":"agent.reply","params":{{"id":{id},"text":"Shorter.","proposal":"Kilns fire clay **slowly**.","format":"markdown"}}}}"#));
+        assert_eq!(r["result"]["shown"], true, "{r}");
+        let req = agents.request(id).unwrap();
+        assert_eq!((req.reply.as_str(), req.proposal.map(|p| p.markdown)), ("Shorter.", Some(true)));
+        assert_eq!(req.state, wordcraft_ui_egui::ask_agent::State::Answered);
+        // Junk is refused with a reason.
+        let id = agents.ask("explain", sel("glaze"), json!({})).unwrap();
+        c.call(r#"{"id":5,"method":"agent.listen","params":{"timeoutMs":1000}}"#);
+        for (params, why) in [
+            (format!(r#"{{"id":{id}}}"#), "missing `text`"),
+            (format!(r#"{{"id":{id},"proposal":5}}"#), "`proposal` is the text"),
+            (format!(r#"{{"id":{id},"proposal":"x","format":"html"}}"#), "`format` is"),
+        ] {
+            let r = c.call(&format!(r#"{{"id":6,"method":"agent.reply","params":{params}}}"#));
+            assert!(r["error"].as_str().unwrap_or("").contains(why), "{params}: {r}");
+        }
     }
 }

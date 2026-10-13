@@ -157,17 +157,20 @@ pub fn delete_selection(s: &mut Session) -> Result<Pos, CmdError> {
     Ok(at)
 }
 
-/// A revision record for the current author.
+/// A revision record for the current author: the author's record of that kind made in the same
+/// second, from [`Session::revision_base`] on, else a new one.
 pub fn new_revision(s: &mut Session, kind: RevisionKind) -> u32 {
     let date = now_iso();
     // Never one end of a move, nor the deletion a cut may still turn into one.
     let held = s.pending_move.as_ref().map(|m| m.rev);
+    let base = s.revision_base;
     if let Some((i, _)) = s
         .doc
         .revisions
         .iter()
         .enumerate()
         .rev()
+        .take_while(|(i, _)| *i >= base)
         .find(|(i, r)| r.kind == kind && r.author == s.author && r.date == date && r.move_name.is_none() && held != Some(*i as u32))
     {
         return i as u32;

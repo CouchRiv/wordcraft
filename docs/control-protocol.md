@@ -66,7 +66,7 @@ and set `WORDCRAFT_CONTROL_KEY` to that app's key.
 | `ui.parity` | — | feature-catalog parity |
 | `ui.resize` / `ui.focus` / `app.quit` | | window control |
 | `agent.listen` | `timeoutMs?`, `agent?` | Ask Agent: the next request from the window, or `{none: true}` (see [Ask Agent](#ask-agent)) |
-| `agent.reply` | `id`, `text`, `done?` | Ask Agent: show the agent's answer in the window |
+| `agent.reply` | `id`, `text?`, `proposal?`, `format?`, `done?` | Ask Agent: show the agent's answer, or the text it proposes, in the window |
 
 Any other method name is treated as a command id: `{"method": "format.bold"}` works.
 
@@ -110,8 +110,8 @@ WordCraft calls no model and holds no key: the agent is whatever the person conn
 
 | Method | Params | Result |
 |---|---|---|
-| `agent.listen` | `timeoutMs?` (default 30000, at most 60000), `agent?` (the agent's name) | the oldest waiting request, `{id, instruction, action, apply, selection: {text, anchor, focus, truncated}, document: {title, saved, language}, review}`, or `{none: true}` when none came in time |
-| `agent.reply` | `id`, `text`, `done?` (default true) | `{id, shown: true, done}`, or `{id, cancelled: true}` when the person cancelled the request |
+| `agent.listen` | `timeoutMs?` (default 30000, at most 60000), `agent?` (the agent's name) | the oldest waiting request, `{id, instruction, action, apply, selection: {text, anchor, focus, truncated}, document: {title, saved, language}, review, proposalFormats, retryOf}`, or `{none: true}` when none came in time |
+| `agent.reply` | `id`, `text?`, `proposal?`, `format?` (`"text"` or `"markdown"`), `done?` (default true); `text`, `proposal` or both | `{id, shown: true, done}`, or `{id, cancelled: true}` when the person cancelled the request |
 
 - Both need the key, like every other method. They are answered on the connection's own thread
   from the window's queue, so an agent waiting in `agent.listen` holds up neither the window nor
@@ -149,13 +149,45 @@ WordCraft calls no model and holds no key: the agent is whatever the person conn
   selecting still work). `review: "trackedChanges"` in the request says so. The MCP bridge adds
   `request` to its calls by itself while a request it took is open, and `agent` from the MCP
   client's name.
+- **Proposals, streamed.** Instead of editing, the agent can send the new text: `agent.reply
+  {id, proposal}` with the whole text so far and `done: false` as it writes (each reply replaces
+  the last, so a lost or repeated reply does no harm), then the final text with `done: true`
+  (`text` stays the short note and may come with it or not). The bubble shows the text growing, at
+  most ten repaints a second, and once it is done the words it removes from the selection struck
+  through and the ones it adds underlined. `format: "markdown"` brings headings, lists, emphasis and
+  tables; plain text takes the formatting where it lands. A proposal is at most 200,000 bytes.
+  `proposalFormats` in the request lists the formats it takes (`[]` for `replyOnly`), and nothing
+  changes in the document until the person accepts.
+- **Accept, Discard, Retry.** Once a request is answered, the bubble (or the corner card) offers
+  them for its result. A proposal: Accept puts it where the person asked, in place of the
+  selection (`replace`, `auto`) or as new paragraphs after it (`insertBelow`), as one Undo step and
+  a tracked change by `Agent (<name>)`, wherever the caret is now; Discard drops it. The agent's
+  own edits: Accept makes exactly this request's tracked changes final, Discard rejects exactly
+  them (`review.accept` / `review.reject {revisions}`, one Undo step each); other authors' changes
+  and other requests' are never touched. Retry rejects the request's edits, if any, and sends the
+  same instruction or quick action about the same text again as a new request with `retryOf: <old
+  id>`, so the agent knows to try something different. Keys: Accept takes the keyboard when the
+  result arrives (Enter accepts, Tab moves to Discard and Retry), unless the person pressed a key
+  while the agent worked; then Escape discards and Ctrl+R (⌘R) retries. Otherwise Escape, like a
+  click in the document, closes the bubble and the result waits in the corner card.
+- **If the text moved.** Accept looks for the text the person asked about where it was; if it
+  changed there, it takes the one other place in the document with the same text (when it is in
+  one paragraph), and otherwise refuses, changing nothing: "The text this request was about has
+  changed since: select it again and ask again."
+- **Edits or a proposal?** One or the other per request: a request the agent already edited takes
+  no proposal, and once it has a proposal, changes for it are refused (reading and selecting still
+  work). A proposal suits a rewrite of the selected text (the quick actions, "make this formal"):
+  the person sees it come and decides, and the agent needs no editing tools. Edits suit changes a
+  proposal can't express: several places in the document, comments, formatting only.
 - `ui.askAgent` (a UI command, through `engine.execute`): no params opens the bubble at the
   selection (an error, with the reason, when no agent listens); `{"instruction": "…"}` queues a
   request without the bubble; `{"action": "shorten"}` sends a quick action; `{"cancel": id}`
-  cancels one; `{"close": true}` closes the bubble. `ui.inspect` reports `askAgent`: `{available,
-  reason, agentListening, bubble, history, requests: [{id, state:
-  "waiting"|"working"|"answered"|"cancelled", action, apply, instruction, agent, reply}], actions:
-  [{id, label, menu, apply}]}`.
+  cancels one; `{"close": true}` closes the bubble; `{"accept": id}`, `{"discard": id}` and
+  `{"retry": id}` do what the bubble's buttons do (Retry answers the new request's `id`).
+  `ui.inspect` reports `askAgent`: `{available, reason, agentListening, bubble, history, requests:
+  [{id, state: "waiting"|"working"|"answered"|"cancelled", action, apply, instruction, agent, reply,
+  proposal: {text, format}, revisions, review: "proposal"|"edits"|null, retryOf}], actions: [{id,
+  label, menu, apply}]}`.
 
 `wordcraft-cli mcp --connect` turns these into the tools `wait_for_request` and
 `reply_to_request` ([MCP server](mcp.md#ask-agent)).

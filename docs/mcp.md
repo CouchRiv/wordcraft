@@ -105,8 +105,8 @@ Ctrl+Shift+O) and type an instruction. Two tools carry it, for any MCP client:
 
 | Tool | What it does |
 |---|---|
-| `wait_for_request` | waits up to `timeout_s` (default 30, at most 60) for the next request: `{id, instruction, action, apply, selection: {text, anchor, focus, truncated}, document: {title, saved, language}, review}`, or `{none: true}` |
-| `reply_to_request` | `{id, text, done?}`: shows `text` in the bubble under the selection; `done: false` is a progress note that keeps the request open; a request the person cancelled answers `{cancelled: true}` |
+| `wait_for_request` | waits up to `timeout_s` (default 30, at most 60) for the next request: `{id, instruction, action, apply, selection: {text, anchor, focus, truncated}, document: {title, saved, language}, review, proposalFormats, retryOf}`, or `{none: true}` |
+| `reply_to_request` | `{id, text?, proposal?, format?, done?}`: shows `text` in the bubble under the selection, and `proposal`, the new text for the document, as a preview; `done: false` keeps the request open (a progress note, or a proposal still being written); a request the person cancelled answers `{cancelled: true}` |
 
 The agent's loop: `wait_for_request`; at once `reply_to_request {id, text: "Rewriting…", done:
 false}`, so the person sees the agent has it; the work with `execute`, `select_text`,
@@ -123,6 +123,16 @@ plain words, and `apply`, where the result goes (`replace` the selection, `inser
 the bridge marks the agent's `execute` calls with it, so what the agent changes arrives as tracked
 changes by `Agent (<MCP client name>)` for the person to accept or reject on the Review tab, even
 with Track Changes off; the person's own setting is left alone.
+
+For a rewrite of the selected text, the agent can send a proposal instead of editing:
+`reply_to_request {id, proposal: "…", done: false}` with all the new text written so far, as many
+times as it likes, then `{id, proposal: "…", done: true}`. The person watches it grow in the bubble,
+then accepts it (the window puts it in place of the selection, or after it for `insertBelow`, as a
+tracked change by the agent and one Undo step), discards it, or retries (a new request with
+`retryOf`). `format: "markdown"` keeps lists, headings and tables. The agent's own edits get the
+same three buttons: Accept makes them final, Discard rejects them, Retry rejects them and asks again.
+Edits and a proposal don't mix in one request; the [control protocol](control-protocol.md#ask-agent)
+says when to use which.
 
 ### Pushed requests (`--channel`)
 

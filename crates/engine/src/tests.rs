@@ -5044,3 +5044,110 @@ fn forced_tracking_records_revisions_without_touching_the_setting() {
     run(&mut s, "review.acceptAll", json!({}));
     assert_eq!(text(&s), "Kilns fire stoneware. More.");
 }
+
+/// `edit.paste {markdown}` (an agent's proposal, Ask Agent) inserts formatted text: list items,
+/// emphasis and paragraphs, not the Markdown marks.
+#[test]
+fn paste_takes_markdown() {
+    let mut s = self::s();
+    run(&mut s, "document.setText", json!({"text": "Intro"}));
+    run(&mut s, "caret.docEnd", json!({}));
+    run(&mut s, "text.newParagraph", json!({}));
+    run(&mut s, "edit.paste", json!({"markdown": "- one\n- two\n\nThe **bold** end"}));
+    let d = run(&mut s, "document.inspect", json!({}));
+    let blocks = d["blocks"].as_array().unwrap();
+    let texts: Vec<&str> = blocks.iter().filter_map(|b| b["text"].as_str()).collect();
+    assert!(texts.contains(&"one") && texts.contains(&"two") && texts.contains(&"The bold end"), "{texts:?}");
+    assert!(!text(&s).contains("**") && !text(&s).contains("- one"), "{}", text(&s));
+    let one = blocks.iter().find(|b| b["text"] == "one").unwrap();
+    assert!(one.get("list").is_some_and(|l| !l.is_null()), "a list item: {one}");
+    let end = blocks.iter().find(|b| b["text"] == "The bold end").unwrap();
+    assert!(end["runs"].as_array().unwrap().iter().any(|r| r["props"]["bold"] == true), "{end}");
+    // Plain text still pastes as text; empty Markdown falls back to it.
+    run(&mut s, "edit.paste", json!({"markdown": "  ", "text": "plain *stars*"}));
+    assert!(text(&s).contains("plain *stars*"));
+}
+
+/// Run `f` as an agent working for one request (what Ask Agent does around each command): its
+/// edits are tracked changes by `author` in records of their own. The revision ids it made.
+fn as_request(s: &mut Session, author: &str, f: impl FnOnce(&mut Session)) -> Vec<u32> {
+    let base = s.doc.revisions.len();
+    let person = std::mem::replace(&mut s.author, author.into());
+    s.force_tracking = true;
+    s.revision_base = base;
+    f(s);
+    s.revision_base = 0;
+    s.force_tracking = false;
+    s.author = person;
+    (base as u32..s.doc.revisions.len() as u32).collect()
+}
+
+/// `review.accept {revisions}` / `review.reject {revisions}` resolve exactly those revisions (one
+/// Ask Agent request's), as one Undo step, and leave every other change, by the same author in the
+/// same second or by someone else, as it was. With `revision_base`, two requests by the same agent
+/// never share a revision record.
+#[test]
+fn accept_and_reject_by_revision_touch_only_those_changes() {
+    let mut s = self::s();
+    run(&mut s, "document.setText", json!({"text": "Kilns fire clay. Glazes melt."}));
+    let first = as_request(&mut s, "Agent (test)", |s| {
+        run(s, "select.text", json!({"text": "clay"}));
+        run(s, "text.insert", json!({"text": "stoneware"}));
+    });
+    let second = as_request(&mut s, "Agent (test)", |s| {
+        run(s, "select.text", json!({"text": "Glazes"}));
+        run(s, "text.insert", json!({"text": "Slips"}));
+    });
+    assert!(!first.is_empty() && !second.is_empty());
+    assert!(first.iter().all(|r| !second.contains(r)), "same author, same second, records of their own: {first:?} {second:?}");
+    // The person's own tracked change.
+    run(&mut s, "review.trackChanges", json!({"value": true}));
+    s.author = "Ana Writer".into();
+    run(&mut s, "select.text", json!({"text": "melt"}));
+    run(&mut s, "text.insert", json!({"text": "run"}));
+    run(&mut s, "review.trackChanges", json!({"value": false}));
+    assert_eq!(text(&s), "Kilns fire stonewareclay. SlipsGlazes runmelt.");
+    let changes = |s: &mut Session| run(s, "review.changes", json!({})).as_array().cloned().unwrap_or_default();
+    assert!(changes(&mut s).iter().all(|c| c["revision"].is_u64()), "review.changes gives each change's revision");
+
+    // Accept the first request: its text is final, everything else is still tracked.
+    let depth = s.undo_depth();
+    run(&mut s, "review.accept", json!({"revisions": first}));
+    assert_eq!(text(&s), "Kilns fire stoneware. SlipsGlazes runmelt.");
+    assert_eq!(s.undo_depth(), depth + 1, "one Undo step");
+    let left = changes(&mut s);
+    assert_eq!(left.len(), 4, "the second request's and the person's changes stay: {left:?}");
+    assert_eq!(left.iter().filter(|c| c["author"] == "Ana Writer").count(), 2);
+    // Undo brings the tracked change back; accept again.
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(text(&s), "Kilns fire stonewareclay. SlipsGlazes runmelt.");
+    run(&mut s, "review.accept", json!({"revisions": first}));
+    // Reject the second request: its text goes, the original is back.
+    run(&mut s, "review.reject", json!({"revisions": second}));
+    assert_eq!(text(&s), "Kilns fire stoneware. Glazes runmelt.");
+    assert!(changes(&mut s).iter().all(|c| c["author"] == "Ana Writer"));
+    // Nothing of theirs left: refused, and no empty Undo step.
+    let depth = s.undo_depth();
+    assert!(s.run("review.accept", &json!({"revisions": second})).is_err());
+    assert_eq!(s.undo_depth(), depth);
+    for junk in [json!({"revisions": "1"}), json!({"revisions": [-1, 1e30, "x", null]}), json!({"revisions": {}})] {
+        assert!(s.run("review.reject", &junk).is_err(), "{junk}");
+    }
+    assert_eq!(text(&s), "Kilns fire stoneware. Glazes runmelt.");
+
+    // A new paragraph and a formatting change by an agent, rejected by revision: undone exactly.
+    let third = as_request(&mut s, "Agent (test)", |s| {
+        run(s, "select.text", json!({"text": "Kilns"}));
+        run(s, "format.bold", json!({}));
+        run(s, "caret.docEnd", json!({}));
+        run(s, "text.newParagraph", json!({}));
+        run(s, "text.insert", json!({"text": "More."}));
+    });
+    assert_eq!(s.doc.paragraph_count(), 2);
+    run(&mut s, "review.reject", json!({"revisions": third}));
+    assert_eq!(s.doc.paragraph_count(), 1, "the inserted paragraph mark is rejected too");
+    assert_eq!(text(&s), "Kilns fire stoneware. Glazes runmelt.");
+    let d = run(&mut s, "document.inspect", json!({}));
+    assert!(!d.to_string().contains("\"bold\":true"), "the bold is rejected: {d}");
+    assert!(changes(&mut s).iter().all(|c| c["author"] == "Ana Writer"), "the person's changes are still there");
+}

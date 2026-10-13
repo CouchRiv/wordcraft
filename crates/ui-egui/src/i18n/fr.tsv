@@ -2106,7 +2106,6 @@
 # Ask Agent quick actions
 	Sent to {agent}…	Envoyé à {agent}…
 	{agent} is working…	{agent} travaille…
-	The agent's changes are tracked: accept or reject them on the Review tab.	Les modifications de l’agent sont suivies : acceptez-les ou refusez-les dans l’onglet Révision.
 	Inserts the result after the selection	Insère le résultat après la sélection
 	Answers in the bubble; changes nothing	Répond dans la bulle, ne modifie rien
 	Replaces the selection; the change is tracked	Remplace la sélection, la modification est suivie
@@ -2128,3 +2127,19 @@
 	Summarize	Résumer
 	Continue writing	Poursuivre la rédaction
 	Explain	Expliquer
+# Ask Agent review: proposals, Accept, Discard, Retry
+	Accepted: the change is tracked as {author}.	Accepté : la modification est suivie au nom de {author}.
+	Accepted the changes by {author}.	Modifications de {author} acceptées.
+	Nothing left to accept: the agent's changes were already accepted, rejected or undone.	Plus rien à accepter : les modifications de l’agent ont déjà été acceptées, refusées ou annulées.
+	Discarded: the changes by {author} are rejected.	Abandonné : les modifications de {author} sont refusées.
+	The text this request was about has changed since: select it again and ask again.	Le texte visé par cette demande a changé depuis : sélectionnez-le de nouveau et redemandez.
+	The agent's changes are tracked: Accept keeps them, Discard rejects them.	Les modifications de l’agent sont suivies : Accepter les conserve, Abandonner les refuse.
+	Discard	Abandonner
+	Retry	Réessayer
+	Ask again: the same request, a new answer	Redemander : la même demande, une nouvelle réponse
+	Put this text in the document, as a tracked change by {author}	Insérer ce texte dans le document, comme modification suivie de {author}
+	Drop this proposal; the document doesn't change	Abandonner cette proposition ; le document ne change pas
+	Make the agent's tracked changes final	Rendre définitives les modifications suivies de l’agent
+	Reject the agent's tracked changes	Refuser les modifications suivies de l’agent
+	Enter	Entrée
+	Esc	Échap

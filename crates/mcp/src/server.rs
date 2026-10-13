@@ -27,7 +27,8 @@ parameters with list_commands and run them with execute (or several with batch).
 execute format.bold → inspect_document to verify → render_page to look at the result → save {path:\"out.docx\"}. \
 Ask Agent: when connected to the app, wait_for_request returns what the person asks from the WordCraft window \
 (an instruction about their selection); send a short progress note with reply_to_request (done: false) at once, do it, \
-then answer with reply_to_request.";
+then answer with reply_to_request. For a rewrite, send the new text as reply_to_request's `proposal` (streamed with done: \
+false, then final): the person accepts, discards or retries it in the window.";
 
 /// Resource URIs.
 pub const DOC_URI: &str = "wordcraft://document";

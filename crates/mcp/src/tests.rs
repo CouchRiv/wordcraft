@@ -271,3 +271,32 @@ fn channel_events_carry_the_action_and_where_the_result_goes() {
     r["apply"] = json!("replyOnly");
     assert!(crate::channel::notification(&r)["params"]["content"].as_str().unwrap().contains("Change nothing in the document"));
 }
+
+/// Ask Agent proposals: `reply_to_request` carries the new text for the document (`proposal`,
+/// streamed whole with `done: false`, then final) without a note, and its format; any client can
+/// send one (before proposals, `text` was required and there was nothing to stream).
+#[test]
+fn reply_to_request_streams_a_proposal() {
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut s = Server::new(Box::new(FakeAgentApp { calls: calls.clone(), request: Some(ask_request()) }));
+    let tools = call(&mut s, 1, "tools/list", json!({}));
+    let reply = tools["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "reply_to_request").cloned().unwrap();
+    assert_eq!(reply["inputSchema"]["required"], json!(["id"]), "text is optional with a proposal");
+    assert_eq!(reply["inputSchema"]["properties"]["format"]["enum"], json!(["text", "markdown"]));
+    tool(&mut s, "wait_for_request", json!({}));
+    let last = |calls: &std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>| calls.lock().unwrap().last().cloned().unwrap();
+    for partial in ["Kilns fire", "Kilns fire clay slowly."] {
+        let r = tool(&mut s, "reply_to_request", json!({"id": 7, "proposal": partial, "done": false}));
+        assert_eq!(r["shown"], true, "{r}");
+        assert_eq!(last(&calls), ("agent.reply".to_string(), json!({"id": 7, "proposal": partial, "done": false})));
+    }
+    tool(&mut s, "reply_to_request", json!({"id": 7, "text": "One sentence now.", "proposal": "Kilns fire clay **slowly**.", "format": "markdown"}));
+    assert_eq!(
+        last(&calls).1,
+        json!({"id": 7, "text": "One sentence now.", "proposal": "Kilns fire clay **slowly**.", "format": "markdown", "done": true})
+    );
+    for bad in [json!({"id": 7, "proposal": 5}), json!({"id": 7, "done": false}), json!({"proposal": "x"})] {
+        let r = call(&mut s, 3, "tools/call", json!({"name": "reply_to_request", "arguments": bad}));
+        assert_eq!(r["result"]["isError"], true, "{r}");
+    }
+}

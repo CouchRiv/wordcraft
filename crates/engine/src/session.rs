@@ -353,6 +353,12 @@ pub struct Session {
     /// so its edits arrive as revisions to accept or reject. Not part of the document, so Undo
     /// and Redo never turn the person's setting on.
     pub force_tracking: bool,
+    /// New revision records share a record (same author, kind and second) only from this index
+    /// of `doc.revisions` on. Ask Agent raises it to the record count around each command an
+    /// agent runs for a request, so that request's revisions are records of its own: accepting or
+    /// rejecting them (`review.accept {revisions}`) never touches another request's or person's.
+    /// 0 (the default) shares as before.
+    pub revision_base: usize,
     /// Initials for comments (File › Options › General); empty = the name's initials.
     pub initials: String,
     /// Format painter: copied formatting waiting to be applied (and whether it stays on).
@@ -586,6 +592,7 @@ impl Session {
             registry: Arc::new(crate::cmd::registry()),
             author: "WordCraft User".into(),
             force_tracking: false,
+            revision_base: 0,
             initials: String::new(),
             painter: None,
             status: String::new(),
@@ -1019,6 +1026,7 @@ impl Session {
             author: _,
             // Like `author`: who is editing, not the document or its history.
             force_tracking: _,
+            revision_base: _,
             initials: _,
             painter: _,
             status: _,

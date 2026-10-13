@@ -189,9 +189,16 @@ pub fn rich_fragment(s: &mut Session, v: &Value) -> Option<Fragment> {
     Some(adopt(s, doc))
 }
 
-/// What Paste inserts: WordCraft's own copy while the system clipboard still holds it, else
-/// another program's formatted copy (HTML, RTF), else the system clipboard's text.
+/// What Paste inserts: Markdown given as `markdown` (an agent's proposal, Ask Agent), else
+/// WordCraft's own copy while the system clipboard still holds it, else another program's
+/// formatted copy (HTML, RTF), else the system clipboard's text.
 pub fn paste_fragment(s: &mut Session, v: &Value) -> Result<Fragment, CmdError> {
+    if let Some(md) = p::str(v, "markdown").filter(|t| !t.trim().is_empty() && t.len() <= MAX_PASTE_BYTES) {
+        let doc = wordcraft_formats::markdown::import(md);
+        if has_content(&doc) {
+            return Ok(adopt(s, doc));
+        }
+    }
     let text = p::str(v, "text").map(|t| t.replace("\r\n", "\n"));
     if let Some(f) = &s.clipboard
         && text.as_ref().is_none_or(|t| f.clipboard_text() == *t)

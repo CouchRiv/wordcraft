@@ -5,11 +5,16 @@
 //! usual commands and answers with `agent.reply`; the answer shows in the window. WordCraft calls
 //! no model and holds no key: the "provider" is whatever agent the person connected.
 //!
+//! The agent can also send its rewrite as a proposal that streams into the bubble
+//! (`agent.reply {proposal}`); once the request is answered the bubble offers Accept, Discard and
+//! Retry, for a proposal (the window applies it, a tracked change by the agent) and for the agent's
+//! own edits (exactly that request's revisions are accepted or rejected).
+//!
 //! [`AgentHub`] is the queue between the window and the control channel. The control server's
 //! connection threads share it, so `agent.listen` waits there, never on the UI thread; the window
 //! reads it every frame and is woken when it changes. See `docs/control-protocol.md` (Ask Agent).
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use egui::{Align2, Key, Modifiers, Order, Pos2, Rect, Vec2, pos2, vec2};
@@ -89,6 +94,13 @@ pub struct Request {
     pub state: State,
     /// The agent's latest text: its answer, or a progress note while it works.
     pub reply: String,
+    /// The text the agent proposes for the document (`agent.reply {proposal}`), as it streams it:
+    /// the whole proposal so far, replaced at every reply. The window applies it on Accept.
+    pub proposal: Option<Proposal>,
+    /// The revisions its edits for it made ([`run_for`]): what Accept and Discard resolve.
+    pub revisions: Vec<u32>,
+    /// The request it asks again (Retry).
+    pub retry_of: Option<u64>,
     /// The agent that took it, as it named itself (`agent.listen {agent}`), cleaned up.
     pub agent: Option<String>,
     /// When an agent took it (`now_ms`).
@@ -108,7 +120,26 @@ impl Request {
             "selection": self.selection,
             "document": self.document,
             "review": "trackedChanges",
+            // Instead of editing, the agent may send the new text (`agent.reply {proposal}`): the
+            // window shows it as it comes and applies it where `apply` says when the person accepts.
+            "proposalFormats": if self.apply == Apply::ReplyOnly { json!([]) } else { json!(["text", "markdown"]) },
+            "retryOf": self.retry_of,
         })
+    }
+
+    /// What the person can accept or discard once it is answered: the agent's proposal, else its
+    /// edits; `None` for an answer alone, or while it is open.
+    pub fn review(&self) -> Option<Review> {
+        if self.state != State::Answered {
+            return None;
+        }
+        if self.proposal.as_ref().is_some_and(|p| !p.text.trim().is_empty()) {
+            Some(Review::Proposal)
+        } else if !self.revisions.is_empty() {
+            Some(Review::Edits)
+        } else {
+            None
+        }
     }
 
     /// The author of the agent's edits and comments for this request: `Agent (name)`.
@@ -125,6 +156,65 @@ impl Request {
         self.action.as_ref().map_or(self.instruction.as_str(), |a| a.label.as_str())
     }
 }
+
+/// What a request's result is, for Accept and Discard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Review {
+    /// Text the agent proposed: Accept puts it in the document (a tracked change by the agent),
+    /// Discard drops it.
+    Proposal,
+    /// Tracked changes the agent made: Accept makes them final, Discard rejects them.
+    Edits,
+}
+
+impl Review {
+    pub fn name(self) -> &'static str {
+        match self {
+            Review::Proposal => "proposal",
+            Review::Edits => "edits",
+        }
+    }
+}
+
+/// What an agent proposes to put in the document (`agent.reply {proposal, format}`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Proposal {
+    pub text: String,
+    /// Markdown (headings, lists, emphasis, tables) rather than plain text, whose lines become
+    /// paragraphs.
+    pub markdown: bool,
+}
+
+impl Proposal {
+    /// `proposal` and `format` from `agent.reply`'s params: `None` without a proposal; an error the
+    /// agent can act on for anything else than text.
+    pub fn from_params(p: &Value) -> Result<Option<Proposal>, String> {
+        let markdown = match p.get("format") {
+            None | Some(Value::Null) => false,
+            Some(f) => match f.as_str() {
+                Some("text") => false,
+                Some("markdown") => true,
+                _ => return Err("`format` is \"text\" or \"markdown\"".into()),
+            },
+        };
+        match p.get("proposal") {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(text)) => Ok(Some(Proposal { text: text.replace("\r\n", "\n"), markdown })),
+            Some(_) => Err("`proposal` is the text to put in the document".into()),
+        }
+    }
+
+    pub fn format(&self) -> &'static str {
+        if self.markdown { "markdown" } else { "text" }
+    }
+}
+
+/// Longest proposal kept, in bytes.
+pub const MAX_PROPOSAL_BYTES: usize = 200_000;
+/// Most revisions one request keeps (as many as `review.accept {revisions}` takes).
+const MAX_REQUEST_REVISIONS: usize = 100_000;
+/// A streamed proposal wakes the window at most this often (ms between repaints).
+const REPAINT_MS: f64 = 100.0;
 
 /// Longest agent name kept, in characters.
 const MAX_AGENT_NAME: usize = 40;
@@ -148,6 +238,8 @@ struct Inner {
     last_seen_ms: f64,
     /// The name of the agent that last listened, when it gave one.
     last_agent: Option<String>,
+    /// When a reply last woke the window (`now_ms`), to pace streamed proposals.
+    last_repaint_ms: f64,
 }
 
 /// The Ask Agent queue, shared by the window and the control channel's connection threads.
@@ -202,10 +294,40 @@ impl AgentHub {
             document,
             state: State::Waiting,
             reply: String::new(),
+            proposal: None,
+            revisions: Vec::new(),
+            retry_of: None,
             agent: None,
             taken_ms: 0.0,
             asked_ms: crate::now_ms(),
         };
+        Ok(self.queue(request))
+    }
+
+    /// Ask again (Retry): request `id`'s instruction or action about the same selection, as a new
+    /// request that says which one it retries (`retryOf`); the old one is cancelled if open, and
+    /// put away. The new request's id.
+    pub fn retry(&self, id: u64) -> Result<u64, String> {
+        let old = self.request(id).ok_or_else(|| format!("no Ask Agent request {id}"))?;
+        self.cancel(id);
+        let new = self.queue(Request {
+            id: 0,
+            state: State::Waiting,
+            reply: String::new(),
+            proposal: None,
+            revisions: Vec::new(),
+            retry_of: Some(id),
+            agent: None,
+            taken_ms: 0.0,
+            asked_ms: crate::now_ms(),
+            ..old
+        });
+        self.dismiss(id);
+        Ok(new)
+    }
+
+    /// Put `request` in the queue under a new id; the id.
+    fn queue(&self, request: Request) -> u64 {
         let id = {
             let mut s = self.lock();
             let id = s.next_id;
@@ -222,7 +344,7 @@ impl AgentHub {
             id
         };
         self.changed();
-        Ok(id)
+        id
     }
 
     /// Cancel request `id` (waiting or being worked on); false when it was already closed or
@@ -314,7 +436,18 @@ impl AgentHub {
     /// otherwise the text is a progress note and the request stays open. A request the person
     /// cancelled answers `{"cancelled": true}` so the agent can stop.
     pub fn reply(&self, id: u64, text: &str, done: bool) -> Result<Value, String> {
-        let text = cap_chars(text.trim(), MAX_TEXT_CHARS);
+        self.answer(id, Some(text), None, done)
+    }
+
+    /// The agent's reply to request `id`: a note or its answer (`text`), a proposal (the whole
+    /// text so far, which replaces the last one), or both. `done` closes the request; a proposal
+    /// then waits for the person's Accept, Discard or Retry. Streamed replies wake the window at
+    /// most every [`REPAINT_MS`], the last one at once. Refused: neither given, a proposal for an
+    /// answer-only request, or for one the agent already changed the document for.
+    pub fn answer(&self, id: u64, text: Option<&str>, proposal: Option<Proposal>, done: bool) -> Result<Value, String> {
+        if text.is_none() && proposal.is_none() {
+            return Err("send `text` (a note or your answer), `proposal` (the text to put in the document), or both".into());
+        }
         let r = {
             let mut s = self.lock();
             s.last_seen_ms = crate::now_ms();
@@ -322,8 +455,20 @@ impl AgentHub {
                 None => Err(format!("no Ask Agent request {id}: it was never made, or the person dismissed it")),
                 Some(r) if r.state == State::Cancelled => Ok(json!({"id": id, "cancelled": true})),
                 Some(r) if r.state == State::Answered => Err(format!("Ask Agent request {id} is already answered")),
+                Some(r) if proposal.is_some() && r.apply == Apply::ReplyOnly => {
+                    Err(format!("Ask Agent request {id} asks for an answer only: send `text`, not a `proposal`"))
+                }
+                Some(r) if proposal.is_some() && !r.revisions.is_empty() => Err(format!(
+                    "Ask Agent request {id} already changed the document (tracked changes, which are its result): answer with `text` only"
+                )),
                 Some(r) => {
-                    r.reply = text;
+                    if let Some(text) = text {
+                        r.reply = cap_chars(text.trim(), MAX_TEXT_CHARS);
+                    }
+                    if let Some(mut p) = proposal {
+                        cap_bytes(&mut p.text, MAX_PROPOSAL_BYTES);
+                        r.proposal = Some(p);
+                    }
                     r.state = if done { State::Answered } else { State::Working };
                     if r.taken_ms == 0.0 {
                         r.taken_ms = crate::now_ms();
@@ -332,8 +477,37 @@ impl AgentHub {
                 }
             }
         };
-        self.changed();
+        self.shared.1.notify_all();
+        self.repaint_soon(done);
         r
+    }
+
+    /// Wake the window for a reply: at once for the last one, else at most every [`REPAINT_MS`].
+    fn repaint_soon(&self, now: bool) {
+        let Some(ctx) = &self.repaint else { return };
+        let t = crate::now_ms();
+        let mut s = self.lock();
+        let since = t - s.last_repaint_ms;
+        if now || !(0.0..REPAINT_MS).contains(&since) {
+            s.last_repaint_ms = t;
+            drop(s);
+            ctx.request_repaint();
+        } else {
+            drop(s);
+            ctx.request_repaint_after(std::time::Duration::from_millis((REPAINT_MS - since).max(1.0) as u64));
+        }
+    }
+
+    /// Record revisions an agent's edit for request `id` made (they are what Accept and Discard
+    /// resolve).
+    pub fn add_revisions(&self, id: u64, revisions: impl IntoIterator<Item = u32>) {
+        if let Some(r) = self.lock().requests.iter_mut().find(|r| r.id == id) {
+            for rev in revisions {
+                if r.revisions.len() < MAX_REQUEST_REVISIONS && !r.revisions.contains(&rev) {
+                    r.revisions.push(rev);
+                }
+            }
+        }
     }
 
     /// The name of the agent that last listened, when it gave one.
@@ -429,6 +603,37 @@ pub struct AskAgent {
     /// The person's recent instructions, newest first. Kept for this session only: they can
     /// quote the document, so they aren't written to the preferences.
     pub history: Vec<String>,
+    /// Where each request's text was when the person asked: where Accept puts a proposal.
+    origins: HashMap<u64, Origin>,
+}
+
+/// Where a request's text was when the person asked, and how to know it is still there.
+#[derive(Clone, Debug)]
+struct Origin {
+    anchor: Pos,
+    focus: Pos,
+    /// [`fingerprint`] of the selection then.
+    print: u64,
+}
+
+impl Origin {
+    fn of(s: &wordcraft_engine::Session) -> Self {
+        Self { anchor: s.sel.anchor.clone(), focus: s.sel.focus.clone(), print: fingerprint(s) }
+    }
+}
+
+/// What is selected, as a hash: the selected text, or for a caret its paragraph's text and its
+/// place in it. The same before and after means the text a request was about is still there.
+fn fingerprint(s: &wordcraft_engine::Session) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    if s.sel.is_collapsed() {
+        s.doc.para_at(&s.sel.focus).map(|p| p.text.as_str()).hash(&mut h);
+        s.sel.focus.off.hash(&mut h);
+    } else {
+        s.selected_text().hash(&mut h);
+    }
+    h.finish()
 }
 
 /// The bubble at the selection.
@@ -439,6 +644,14 @@ pub struct Bubble {
     pub text: String,
     /// The request sent from it; `None` while the person types.
     pub request: Option<u64>,
+    /// The person pressed a key since the request was sent: the result then doesn't take the
+    /// keyboard from them.
+    typed: bool,
+    /// The request whose result last took the keyboard (Accept is focused once per result).
+    reviewed: Option<u64>,
+    /// Its buttons held the keyboard last frame (Escape takes the focus away before they are
+    /// drawn, so Escape asks this).
+    held_keys: bool,
     /// The box has taken the keyboard once.
     focused: bool,
     /// Its size last frame, to place it (a first guess before it is drawn).
@@ -447,7 +660,7 @@ pub struct Bubble {
 
 impl Bubble {
     fn at(anchor: Pos) -> Self {
-        Self { anchor, text: String::new(), request: None, focused: false, size: vec2(WIDTH, 360.0) }
+        Self { anchor, text: String::new(), request: None, typed: false, reviewed: None, held_keys: false, focused: false, size: vec2(WIDTH, 360.0) }
     }
 }
 
@@ -469,7 +682,12 @@ impl AskAgent {
             .iter()
             .flat_map(AgentHub::requests)
             .map(|r| {
-                json!({"id": r.id, "state": r.state.name(), "action": r.action.as_ref().map(|a| a.id.clone()), "apply": r.apply.name(), "instruction": r.instruction, "agent": r.agent, "reply": r.reply})
+                json!({
+                    "id": r.id, "state": r.state.name(), "action": r.action.as_ref().map(|a| a.id.clone()), "apply": r.apply.name(),
+                    "instruction": r.instruction, "agent": r.agent, "reply": r.reply,
+                    "proposal": r.proposal.as_ref().map(|p| json!({"text": p.text, "format": p.format()})),
+                    "revisions": r.revisions, "review": r.review().map(Review::name), "retryOf": r.retry_of,
+                })
             })
             .collect();
         json!({
@@ -529,7 +747,8 @@ fn document(app: &mut WordApp) -> Value {
 
 /// `ui.askAgent`. No params: open the bubble at the selection (refused, with the reason, when no
 /// agent is listening). `instruction`: send it without the box; `action`: send that quick action.
-/// `cancel`: cancel that request. `close`: close the bubble.
+/// `cancel`: cancel that request. `close`: close the bubble. `accept`, `discard`, `retry`: what
+/// the bubble's buttons do with a request's result ([`accept`], [`discard`], [`retry`]).
 pub fn command(app: &mut WordApp, p: &Value) -> Result<Value, String> {
     if let Some(id) = p.get("cancel") {
         let id = id.as_u64().ok_or("`cancel` is a request id")?;
@@ -540,6 +759,12 @@ pub fn command(app: &mut WordApp, p: &Value) -> Result<Value, String> {
         app.ask_agent.bubble = None;
         return Ok(json!({}));
     }
+    for (key, f) in [("accept", accept as fn(&mut WordApp, u64) -> Result<Value, String>), ("discard", discard), ("retry", retry)] {
+        if let Some(id) = p.get(key) {
+            let id = id.as_u64().ok_or_else(|| format!("`{key}` is a request id"))?;
+            return f(app, id);
+        }
+    }
     let Some(hub) = app.ask_agent.hub.clone() else {
         let why = app.ask_agent.unavailable().unwrap_or(Unavailable::NoControlChannel);
         app.status(why.shown());
@@ -549,14 +774,16 @@ pub fn command(app: &mut WordApp, p: &Value) -> Result<Value, String> {
         let id = action.as_str().ok_or("`action` is a quick action's id")?;
         let action =
             crate::agent_actions::find(id).ok_or_else(|| format!("no quick action `{id}` (ui.inspect lists them under askAgent.actions)"))?;
-        let (selection, document) = (selection(app), document(app));
+        let (selection, document, origin) = (selection(app), document(app), Origin::of(&app.session));
         let id = hub.ask_with("", Some(&action), selection, document)?;
+        app.ask_agent.keep_origin(id, origin);
         return Ok(json!({"id": id}));
     }
     if let Some(text) = p.get("instruction") {
         let text = text.as_str().ok_or("`instruction` is text")?;
-        let (selection, document) = (selection(app), document(app));
+        let (selection, document, origin) = (selection(app), document(app), Origin::of(&app.session));
         let id = hub.ask(text, selection, document)?;
+        app.ask_agent.keep_origin(id, origin);
         remember(&mut app.ask_agent.history, text);
         return Ok(json!({"id": id}));
     }
@@ -585,12 +812,195 @@ pub fn run_for(app: &mut WordApp, id: u64, command: &str, run: impl FnOnce(&mut 
             "Ask Agent request {id} asks for an answer only: the document must not change, so `{command}` was not run; answer with agent.reply"
         ));
     }
-    let author = std::mem::replace(&mut app.session.author, request.author());
+    if mutates && request.proposal.is_some() {
+        return Err(format!(
+            "Ask Agent request {id} has a proposal, which the window puts in the document when the person accepts it: `{command}` was not run; send the whole new text as `proposal` instead"
+        ));
+    }
+    let (r, made) = as_agent(app, request.author(), run);
+    if let Some(hub) = &app.ask_agent.hub {
+        hub.add_revisions(id, made);
+    }
+    r
+}
+
+/// Run `f` as the agent named `author`: what it changes is a tracked change by that author, in
+/// revision records of its own ([`wordcraft_engine::Session::revision_base`]); the person's name
+/// and Track Changes setting are left as they were. `f`'s result, and the revisions it made.
+fn as_agent<T>(app: &mut WordApp, author: String, f: impl FnOnce(&mut WordApp) -> T) -> (T, std::ops::Range<u32>) {
+    let base = app.session.doc.revisions.len();
+    let author = std::mem::replace(&mut app.session.author, author);
     let forced = std::mem::replace(&mut app.session.force_tracking, true);
-    let r = run(app);
+    let floor = std::mem::replace(&mut app.session.revision_base, base);
+    let r = f(app);
     app.session.author = author;
     app.session.force_tracking = forced;
-    r
+    app.session.revision_base = floor;
+    let to_u32 = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+    (r, to_u32(base)..to_u32(app.session.doc.revisions.len()).max(to_u32(base)))
+}
+
+impl AskAgent {
+    /// Remember where request `id`'s text was; forget requests that are gone.
+    fn keep_origin(&mut self, id: u64, origin: Origin) {
+        self.origins.insert(id, origin);
+        if self.origins.len() > 2 * KEEP
+            && let Some(hub) = &self.hub
+        {
+            let live: Vec<u64> = hub.requests().iter().map(|r| r.id).collect();
+            self.origins.retain(|id, _| live.contains(id));
+        }
+    }
+
+    /// The bubble no longer follows request `id` (it was accepted, discarded or retried).
+    fn finished(&mut self, id: u64, next: Option<u64>) {
+        if let Some(b) = self.bubble.as_mut().filter(|b| b.request == Some(id)) {
+            match next {
+                Some(next) => {
+                    b.request = Some(next);
+                    b.typed = false;
+                }
+                None => self.bubble = None,
+            }
+        }
+        self.origins.remove(&id);
+    }
+}
+
+/// Accept request `id`'s result. A proposal goes in the document where the person asked: in
+/// place of the text they had selected (`replace`, typed requests), or after its paragraph
+/// (`insertBelow`), as one Undo step and a tracked change by the agent, wherever the caret is now.
+/// The text must still be there: at the same place, else found again when it is in one paragraph
+/// and only once in the document; otherwise nothing changes and the person is asked to select it
+/// again. The agent's own edits are made final instead (`review.accept {revisions}`, one Undo
+/// step); another author's changes, or another request's, are never touched.
+pub fn accept(app: &mut WordApp, id: u64) -> Result<Value, String> {
+    let hub = app.ask_agent.hub.clone().ok_or("no Ask Agent queue")?;
+    let r = hub.request(id).ok_or_else(|| format!("no Ask Agent request {id}"))?;
+    if r.state.open() {
+        return Err(format!("Ask Agent request {id} is still being worked on: wait for the agent's answer, or cancel it"));
+    }
+    let author = r.author();
+    let result = match (r.review(), &r.proposal) {
+        (Some(Review::Proposal), Some(p)) => {
+            apply_proposal(app, &r, p)?;
+            app.status(crate::i18n::fmt(tl!("Accepted: the change is tracked as {author}."), &[("author", &author)]));
+            json!({"accepted": id, "review": "proposal", "author": author})
+        }
+        (Some(Review::Edits), _) => {
+            let resolved = resolve_edits(app, &r, true)?;
+            if resolved {
+                app.status(crate::i18n::fmt(tl!("Accepted the changes by {author}."), &[("author", &author)]));
+            } else {
+                app.status(tl!("Nothing left to accept: the agent's changes were already accepted, rejected or undone.").to_string());
+            }
+            json!({"accepted": id, "review": "edits", "author": author, "resolved": resolved})
+        }
+        _ => return Err(format!("Ask Agent request {id} has nothing to accept: no proposal and no change in the document")),
+    };
+    hub.dismiss(id);
+    app.ask_agent.finished(id, None);
+    app.canvas.want_focus = true;
+    Ok(result)
+}
+
+/// Discard request `id`'s result: drop its proposal, or reject the agent's edits for it (one Undo
+/// step); a request still open is cancelled first. The request is put away.
+pub fn discard(app: &mut WordApp, id: u64) -> Result<Value, String> {
+    let hub = app.ask_agent.hub.clone().ok_or("no Ask Agent queue")?;
+    let r = hub.request(id).ok_or_else(|| format!("no Ask Agent request {id}"))?;
+    hub.cancel(id);
+    let rejected = r.proposal.is_none() && !r.revisions.is_empty() && resolve_edits(app, &r, false)?;
+    hub.dismiss(id);
+    app.ask_agent.finished(id, None);
+    app.canvas.want_focus = true;
+    if rejected {
+        app.status(crate::i18n::fmt(tl!("Discarded: the changes by {author} are rejected."), &[("author", &r.author())]));
+    }
+    Ok(json!({"discarded": id, "rejected": rejected}))
+}
+
+/// Ask again: the agent's edits for request `id` are rejected (one Undo step), then the same
+/// instruction or quick action about the same text goes out as a new request (`retryOf`), which
+/// the bubble follows. Its id.
+pub fn retry(app: &mut WordApp, id: u64) -> Result<Value, String> {
+    let hub = app.ask_agent.hub.clone().ok_or("no Ask Agent queue")?;
+    let r = hub.request(id).ok_or_else(|| format!("no Ask Agent request {id}"))?;
+    hub.cancel(id);
+    if r.proposal.is_none() && !r.revisions.is_empty() {
+        resolve_edits(app, &r, false)?;
+    }
+    let new = hub.retry(id)?;
+    if let Some(origin) = app.ask_agent.origins.get(&id).cloned() {
+        app.ask_agent.origins.insert(new, origin);
+    }
+    app.ask_agent.finished(id, Some(new));
+    app.canvas.want_focus = true;
+    Ok(json!({"id": new, "retryOf": id}))
+}
+
+/// Accept or reject the agent's edits for request `r` (its revisions still by its author); false
+/// when none is left (accepted, rejected or undone already).
+fn resolve_edits(app: &mut WordApp, r: &Request, accept: bool) -> Result<bool, String> {
+    let author = r.author();
+    let ids: Vec<u32> =
+        r.revisions.iter().copied().filter(|i| app.session.doc.revisions.get(*i as usize).is_some_and(|rev| rev.author == author)).collect();
+    if ids.is_empty() {
+        return Ok(false);
+    }
+    match app.execute(if accept { "review.accept" } else { "review.reject" }, json!({"revisions": ids})) {
+        Ok(_) => Ok(true),
+        // None of them is in the document any more.
+        Err(e) if e.contains("none of these revisions") => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Put `p`, request `r`'s proposal, in the document where the person asked (see [`accept`]). On
+/// failure the document, the selection and Undo are as they were.
+fn apply_proposal(app: &mut WordApp, r: &Request, p: &Proposal) -> Result<(), String> {
+    let snap = app.session.edit_snapshot();
+    let found = app.ask_agent.origins.get(&r.id).cloned().is_some_and(|o| locate(app, r, &o));
+    if !found {
+        app.session.restore(snap);
+        // English for scripts; the window shows it through the catalogs (`review_act`).
+        return Err("The text this request was about has changed since: select it again and ask again.".into());
+    }
+    // Plain text takes the formatting where it lands; Markdown brings its own (lists, headings).
+    let (paste, params) = if p.markdown { ("edit.paste", json!({"markdown": p.text})) } else { ("edit.pasteMerge", json!({"text": p.text})) };
+    let below = r.apply == Apply::InsertBelow;
+    let (done, _) = as_agent(app, r.author(), |app| -> Result<(), String> {
+        if below {
+            let (_, b) = app.session.sel.ordered();
+            let end = app.session.doc.para_at(&b).map_or(b.off, |para| para.len());
+            app.execute("caret.set", json!({"pos": wordcraft_engine::cmd::pos_json(&Pos { off: end, ..b })}))?;
+            app.execute("text.newParagraph", json!({}))?;
+            // The new paragraph and the text in it are one Undo step.
+            app.session.join_next_undo();
+        }
+        app.execute(paste, params).map(drop)
+    });
+    if done.is_err() {
+        app.session.restore(snap);
+    }
+    done
+}
+
+/// Select the text request `r` was about: where it was if it is unchanged, else the one place in
+/// the document with that text (in one paragraph of the body). Whether it was found.
+fn locate(app: &mut WordApp, r: &Request, o: &Origin) -> bool {
+    let range = json!({"anchor": wordcraft_engine::cmd::pos_json(&o.anchor), "focus": wordcraft_engine::cmd::pos_json(&o.focus)});
+    if app.session.run("select.range", &range).is_ok() && fingerprint(&app.session) == o.print {
+        return true;
+    }
+    let text = r.selection.get("text").and_then(Value::as_str).unwrap_or("");
+    let whole = r.selection.get("truncated").and_then(Value::as_bool) != Some(true);
+    if text.is_empty() || !whole || text.contains('\n') || o.anchor.story != wordcraft_doc::StoryRef::Body {
+        return false;
+    }
+    let unique = app.session.run("select.text", &json!({"text": text, "occurrence": 2})).is_err()
+        && app.session.run("select.text", &json!({"text": text})).is_ok();
+    unique && fingerprint(&app.session) == o.print
 }
 
 /// Send what is in the box; the bubble then follows the request.
@@ -739,7 +1149,21 @@ fn show_bubble(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) -> Option
         return None;
     }
     let at = crate::canvas::pos_screen(app, &anchor);
-    let width = if current.as_ref().is_some_and(|r| r.reply.chars().count() > 160) { WIDE } else { WIDTH };
+    let width = if current.as_ref().is_some_and(|r| r.reply.chars().count() > 160 || r.proposal.is_some()) { WIDE } else { WIDTH };
+    // A key the person presses while the agent works: its result then won't take the keyboard.
+    if current.as_ref().is_some_and(|r| r.state.open())
+        && ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. } | egui::Event::Text(_))))
+        && let Some(b) = app.ask_agent.bubble.as_mut()
+    {
+        b.typed = true;
+    }
+    // A result to review takes the keyboard once (Enter accepts), unless the person was typing.
+    let take_keys =
+        current.as_ref().is_some_and(|r| r.review().is_some()) && app.ask_agent.bubble.as_ref().is_some_and(|b| b.reviewed != b.request && !b.typed);
+    if let Some(b) = app.ask_agent.bubble.as_mut().filter(|_| current.as_ref().is_some_and(|r| r.review().is_some())) {
+        b.reviewed = b.request;
+    }
+    let mut keys_here = false;
     let height = app.ask_agent.bubble.as_ref().map_or(360.0, |b| b.size.y);
     let pos = bubble_pos(at, vec2(width, height), viewport)?;
     let chars = app.session.selected_text().chars().count();
@@ -822,10 +1246,13 @@ fn show_bubble(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) -> Option
                     // What was asked, in grey, then where it stands.
                     ui.add(egui::Label::new(egui::RichText::new(shown_title(r)).small().color(t.text_dim)).truncate()).on_hover_text(&r.instruction);
                     status(ui, r, present, animate, listening.as_deref());
-                    // What the agent changed is tracked: the Review tab accepts or rejects it.
-                    if r.state == State::Answered && r.apply != Apply::ReplyOnly {
+                    if let Some(p) = r.proposal.as_ref().filter(|p| !p.text.is_empty()) {
+                        preview(ui, &t, r, p);
+                    }
+                    let review = r.review();
+                    if review == Some(Review::Edits) {
                         ui.label(
-                            egui::RichText::new(tl!("The agent's changes are tracked: accept or reject them on the Review tab.")).small().weak(),
+                            egui::RichText::new(tl!("The agent's changes are tracked: Accept keeps them, Discard rejects them.")).small().weak(),
                         );
                     }
                     ui.horizontal(|ui| {
@@ -833,8 +1260,23 @@ fn show_bubble(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) -> Option
                             if ui.button(tl!("Cancel")).clicked() {
                                 act = BubbleAct::Cancel(r.id);
                             }
-                        } else if ui.button(tl!("Close")).clicked() {
-                            act = BubbleAct::Dismiss(r.id);
+                        } else if let Some(review) = review {
+                            let (a, d, re) = review_buttons(ui, review, &r.author(), take_keys);
+                            keys_here = a.has_focus() || d.has_focus() || re.has_focus();
+                            if a.clicked() {
+                                act = BubbleAct::Accept(r.id);
+                            } else if d.clicked() {
+                                act = BubbleAct::Discard(r.id);
+                            } else if re.clicked() {
+                                act = BubbleAct::Retry(r.id);
+                            }
+                        } else {
+                            if r.state == State::Answered && ui.button(tl!("Retry")).on_hover_text(retry_hint()).clicked() {
+                                act = BubbleAct::Retry(r.id);
+                            }
+                            if ui.button(tl!("Close")).clicked() {
+                                act = BubbleAct::Dismiss(r.id);
+                            }
                         }
                     });
                 }
@@ -851,8 +1293,19 @@ fn show_bubble(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) -> Option
     let press = ctx.input(|i| if i.pointer.any_pressed() { i.pointer.press_origin() } else { None });
     let elsewhere =
         press.is_some_and(|p| viewport.contains(p) && !rect.contains(p) && !ctx.layer_id_at(p).is_some_and(|l| l.order >= Order::Foreground));
+    // With the bubble's buttons holding the keyboard, Ctrl+R (⌘R) asks again.
+    let retry_key = keys_here && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::R));
+    if let (BubbleAct::None, true, Some(r)) = (&act, retry_key, &current) {
+        act = BubbleAct::Retry(r.id);
+    }
+    let held = app.ask_agent.bubble.as_mut().is_some_and(|b| std::mem::replace(&mut b.held_keys, keys_here));
     if matches!(act, BubbleAct::None) && (escape || elsewhere) {
         act = match &current {
+            // Escape discards a result waiting for review while the bubble has the keyboard;
+            // otherwise (the person was typing in the document), and after a click elsewhere, the
+            // result waits in the corner card.
+            Some(r) if r.review().is_some() && escape && (held || keys_here) => BubbleAct::Discard(r.id),
+            Some(r) if r.review().is_some() => BubbleAct::Close,
             Some(r) if !r.state.open() => BubbleAct::Dismiss(r.id),
             _ => BubbleAct::Close,
         };
@@ -877,6 +1330,9 @@ fn show_bubble(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) -> Option
             app.ask_agent.bubble = None;
             app.canvas.want_focus = true;
         }
+        BubbleAct::Accept(id) => review_act(app, "accept", id),
+        BubbleAct::Discard(id) => review_act(app, "discard", id),
+        BubbleAct::Retry(id) => review_act(app, "retry", id),
     }
     request
 }
@@ -888,6 +1344,197 @@ enum BubbleAct {
     Close,
     Cancel(u64),
     Dismiss(u64),
+    Accept(u64),
+    Discard(u64),
+    Retry(u64),
+}
+
+/// Accept, Discard or Retry from a button or a key; a refusal goes to the status bar.
+fn review_act(app: &mut WordApp, what: &str, id: u64) {
+    if let Err(e) = command(app, &json!({what: id})) {
+        app.status(tl!(&e).to_string());
+    }
+}
+
+/// Retry's tooltip.
+fn retry_hint() -> String {
+    format!("{} ({})", tl!("Ask again: the same request, a new answer"), crate::widgets::key_text("Mod+R"))
+}
+
+/// Accept (the accent button), Discard and Retry for a result, with what each does and its key.
+/// `focus` gives Accept the keyboard (Enter accepts, Tab goes to the others).
+fn review_buttons(ui: &mut egui::Ui, review: Review, author: &str, focus: bool) -> (egui::Response, egui::Response, egui::Response) {
+    let (accept_tip, discard_tip) = match review {
+        Review::Proposal => (
+            crate::i18n::fmt(tl!("Put this text in the document, as a tracked change by {author}"), &[("author", author)]),
+            tl!("Drop this proposal; the document doesn't change").to_string(),
+        ),
+        Review::Edits => (tl!("Make the agent's tracked changes final").to_string(), tl!("Reject the agent's tracked changes").to_string()),
+    };
+    let accept = ui.add(crate::widgets::primary_button(ui, tl!("Accept"))).on_hover_text(format!("{accept_tip} ({})", tl!("Enter")));
+    if focus {
+        accept.request_focus();
+    }
+    let discard = ui.button(tl!("Discard")).on_hover_text(format!("{discard_tip} ({})", tl!("Esc")));
+    let retry = ui.button(tl!("Retry")).on_hover_text(retry_hint());
+    (accept, discard, retry)
+}
+
+/// The proposal in the bubble: the text as it streams in (scrolled to its end while the agent
+/// writes); once done, for a plain-text proposal that replaces the selection, the words it removes
+/// struck through and the words it adds underlined.
+fn preview(ui: &mut egui::Ui, t: &Tokens, r: &Request, p: &Proposal) {
+    let original = r.selection.get("text").and_then(Value::as_str).unwrap_or("");
+    let whole = r.selection.get("truncated").and_then(Value::as_bool) != Some(true);
+    let compare = r.state == State::Answered && !p.markdown && r.apply != Apply::InsertBelow && !original.is_empty() && whole;
+    egui::Frame::new()
+        .fill(t.input)
+        .stroke(egui::Stroke::new(1.0, t.input_border))
+        .corner_radius(egui::CornerRadius::same(4))
+        .inner_margin(egui::Margin::same(6))
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt(("wc_ask_agent_proposal", r.id))
+                .max_height(220.0)
+                .auto_shrink([false, true])
+                .stick_to_bottom(r.state.open())
+                .show(ui, |ui| {
+                    // Computed once per proposal (it no longer changes once done), not every frame.
+                    let key = egui::Id::new(("wc_ask_agent_diff", r.id, p.text.len()));
+                    let diff = if compare {
+                        ui.ctx().data(|d| d.get_temp::<Option<Arc<Vec<(Change, String)>>>>(key)).unwrap_or_else(|| {
+                            let parts = word_diff(original, &p.text).map(Arc::new);
+                            ui.ctx().data_mut(|d| d.insert_temp(key, parts.clone()));
+                            parts
+                        })
+                    } else {
+                        None
+                    };
+                    match diff {
+                        Some(parts) => {
+                            let font = egui::TextStyle::Body.resolve(ui.style());
+                            let mut job = egui::text::LayoutJob::default();
+                            for (change, text) in parts.iter() {
+                                let mut f = egui::TextFormat { font_id: font.clone(), color: t.text, ..Default::default() };
+                                match change {
+                                    Change::Same => {}
+                                    Change::Removed => {
+                                        f.color = t.red;
+                                        f.strikethrough = egui::Stroke::new(1.0, t.red);
+                                    }
+                                    Change::Added => {
+                                        f.color = t.green;
+                                        f.underline = egui::Stroke::new(1.0, t.green);
+                                    }
+                                }
+                                job.append(text, 0.0, f);
+                            }
+                            job.wrap.max_width = ui.available_width();
+                            ui.add(egui::Label::new(job).selectable(true).wrap());
+                        }
+                        None => drop(ui.add(egui::Label::new(p.text.as_str()).selectable(true).wrap())),
+                    }
+                });
+        });
+}
+
+/// A piece of a word comparison.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Change {
+    Same,
+    Removed,
+    Added,
+}
+
+/// Comparisons bigger than this (words before × words after) aren't made.
+const MAX_DIFF_CELLS: usize = 250_000;
+
+/// `old` → `new` word by word (words, spaces and punctuation are the pieces), the longest common
+/// run kept: what stays, what goes, what comes, in order, neighbours of a kind joined. `None` when
+/// the texts are too long to compare.
+pub fn word_diff(old: &str, new: &str) -> Option<Vec<(Change, String)>> {
+    let (a, b) = (pieces(old), pieces(new));
+    let (n, m) = (a.len(), b.len());
+    if n.checked_mul(m).is_none_or(|cells| cells > MAX_DIFF_CELLS) {
+        return None;
+    }
+    // lcs[i][j]: the longest common run of a[i..] and b[j..].
+    let w = m + 1;
+    let mut lcs = vec![0u32; (n + 1) * w];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            let v = if a.get(i) == b.get(j) {
+                lcs.get((i + 1) * w + j + 1).copied().unwrap_or(0).saturating_add(1)
+            } else {
+                lcs.get((i + 1) * w + j).copied().unwrap_or(0).max(lcs.get(i * w + j + 1).copied().unwrap_or(0))
+            };
+            if let Some(c) = lcs.get_mut(i * w + j) {
+                *c = v;
+            }
+        }
+    }
+    let at = |i: usize, j: usize| lcs.get(i * w + j).copied().unwrap_or(0);
+    let mut out: Vec<(Change, String)> = Vec::new();
+    let mut push = |c: Change, s: &str| match out.last_mut() {
+        Some((last, text)) if *last == c => text.push_str(s),
+        _ => out.push((c, s.to_string())),
+    };
+    let (mut i, mut j) = (0, 0);
+    while i < n || j < m {
+        match (a.get(i), b.get(j)) {
+            (Some(x), Some(y)) if x == y => {
+                push(Change::Same, x);
+                i += 1;
+                j += 1;
+            }
+            (Some(x), Some(_)) if at(i + 1, j) >= at(i, j + 1) => {
+                push(Change::Removed, x);
+                i += 1;
+            }
+            (_, Some(y)) => {
+                push(Change::Added, y);
+                j += 1;
+            }
+            (Some(x), None) => {
+                push(Change::Removed, x);
+                i += 1;
+            }
+            (None, None) => break,
+        }
+    }
+    Some(out)
+}
+
+/// A text cut into words (letters and digits), runs of spaces, and single other characters.
+fn pieces(text: &str) -> Vec<&str> {
+    let kind = |c: char| {
+        if c.is_alphanumeric() {
+            0
+        } else if c.is_whitespace() {
+            1
+        } else {
+            2
+        }
+    };
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut prev: Option<u8> = None;
+    for (i, c) in text.char_indices() {
+        let k = kind(c);
+        if let Some(p) = prev
+            && (p != k || k == 2)
+        {
+            if let Some(piece) = text.get(start..i) {
+                out.push(piece);
+            }
+            start = i;
+        }
+        prev = Some(k);
+    }
+    if let Some(piece) = text.get(start..).filter(|p| !p.is_empty()) {
+        out.push(piece);
+    }
+    out
 }
 
 /// The quick actions, as a menu: top-level ones as items, the others in their submenus (Rewrite,
@@ -974,6 +1621,8 @@ fn status(ui: &mut egui::Ui, r: &Request, present: bool, animate: bool, listenin
             }
         }
         // The agent's own words: shown whole, as it wrote them, selectable to copy.
+        // A proposal says enough by itself (it shows below).
+        State::Answered if r.reply.is_empty() && r.proposal.is_some() => {}
         State::Answered if r.reply.is_empty() => drop(ui.label(tl!("Done."))),
         State::Answered => {
             egui::ScrollArea::vertical().id_salt(("wc_ask_agent_reply", r.id)).max_height(260.0).auto_shrink([false, true]).show(ui, |ui| {
@@ -1033,6 +1682,7 @@ fn show_requests(app: &mut WordApp, ctx: &egui::Context, viewport: Rect, in_bubb
     let listening = hub.agent_name();
     let animate = app.animations_on();
     let t = Tokens::get(ctx);
+    let mut act = None;
     egui::Area::new(egui::Id::new("wc_ask_agent_requests"))
         .order(Order::Foreground)
         .pivot(Align2::RIGHT_BOTTOM)
@@ -1048,10 +1698,26 @@ fn show_requests(app: &mut WordApp, ctx: &egui::Context, viewport: Rect, in_bubb
                     ui.separator();
                     ui.add(egui::Label::new(egui::RichText::new(shown_title(r)).small().color(t.text_dim)).truncate());
                     status(ui, r, present, animate, listening.as_deref());
+                    if let Some(p) = r.proposal.as_ref().filter(|p| !p.text.is_empty()) {
+                        // The proposal's start; the whole of it is in the bubble.
+                        ui.add(egui::Label::new(egui::RichText::new(p.text.as_str()).small()).truncate()).on_hover_text(p.text.as_str());
+                    }
                     if r.state.open() {
                         if ui.small_button(tl!("Cancel")).clicked() {
                             hub.cancel(r.id);
                         }
+                    } else if r.review().is_some() {
+                        ui.horizontal(|ui| {
+                            if ui.small_button(tl!("Accept")).clicked() {
+                                act = Some(("accept", r.id));
+                            }
+                            if ui.small_button(tl!("Discard")).clicked() {
+                                act = Some(("discard", r.id));
+                            }
+                            if ui.small_button(tl!("Retry")).on_hover_text(retry_hint()).clicked() {
+                                act = Some(("retry", r.id));
+                            }
+                        });
                     } else if ui.small_button(tl!("Dismiss")).clicked() {
                         hub.dismiss(r.id);
                     }
@@ -1064,6 +1730,9 @@ fn show_requests(app: &mut WordApp, ctx: &egui::Context, viewport: Rect, in_bubb
                 }
             });
         });
+    if let Some((what, id)) = act {
+        review_act(app, what, id);
+    }
 }
 
 #[cfg(test)]
@@ -1545,5 +2214,314 @@ mod tests {
         let _ = crate::control::handle(&mut a, &ctx, &req);
         assert!(!a.session.doc.revisions.is_empty(), "the agent's edit is a tracked change");
         assert!(!a.session.doc.settings.track_changes, "the person's setting is untouched");
+    }
+
+    // Stage (c): proposals, Accept / Discard / Retry.
+
+    fn app_with(hub: &AgentHub, text: &str) -> WordApp {
+        let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Default::default()).with_agent_hub(hub.clone());
+        a.run("text.insert", json!({"text": text})).unwrap();
+        a.session.author = "Ana Writer".into();
+        a
+    }
+
+    fn body(a: &WordApp) -> String {
+        a.session.doc.plain_text(wordcraft_doc::StoryRef::Body)
+    }
+
+    fn proposal(text: &str) -> Option<Proposal> {
+        Some(Proposal { text: text.into(), markdown: false })
+    }
+
+    /// An agent's `engine.execute` for request `id`.
+    fn exec_for(a: &mut WordApp, id: u64, command: &str, params: Value) -> Value {
+        let ctx = egui::Context::default();
+        let (req, _) = crate::ControlRequest::new("engine.execute", json!({"command": command, "params": params, "request": id}));
+        match crate::control::handle(a, &ctx, &req) {
+            crate::control::Outcome::Done(v) => v,
+            crate::control::Outcome::Screenshot { .. } => Value::Null,
+        }
+    }
+
+    #[test]
+    fn word_diff_marks_what_goes_and_what_comes() {
+        let d = word_diff("Kilns fire the clay slowly.", "Kilns fire clay fast.").unwrap();
+        assert_eq!(
+            d,
+            vec![
+                (Change::Same, "Kilns fire ".to_string()),
+                (Change::Removed, "the ".to_string()),
+                (Change::Same, "clay ".to_string()),
+                (Change::Removed, "slowly".to_string()),
+                (Change::Added, "fast".to_string()),
+                (Change::Same, ".".to_string()),
+            ]
+        );
+        assert_eq!(word_diff("", "New text").unwrap(), vec![(Change::Added, "New text".to_string())]);
+        assert_eq!(word_diff("été à Montréal", "été").unwrap()[0], (Change::Same, "été".to_string()), "letters beyond ASCII are words");
+        // Too long to compare: no comparison, never a huge table.
+        let long = "word ".repeat(2000);
+        assert!(word_diff(&long, &long).is_none());
+    }
+
+    /// The queue: a proposal streams (each reply replaces the text so far), closes with `done`, and
+    /// is refused for an answer-only request or one the agent already edited; Retry asks again
+    /// with `retryOf`.
+    #[test]
+    fn proposals_stream_and_retry_asks_again() {
+        let hub = AgentHub::new(7985, None);
+        let id = hub.ask("shorten", sel("Kilns fire the clay slowly."), json!({})).unwrap();
+        let r = hub.listen(Duration::from_millis(10), || true).unwrap();
+        assert_eq!(r.to_json()["proposalFormats"], json!(["text", "markdown"]));
+        assert_eq!(r.to_json()["retryOf"], Value::Null);
+        assert!(hub.answer(id, None, None, false).is_err(), "neither a note nor a proposal");
+        hub.answer(id, Some("Shortening…"), proposal("Kilns"), false).unwrap();
+        hub.answer(id, None, proposal("Kilns fire clay."), false).unwrap();
+        let r = hub.request(id).unwrap();
+        assert_eq!((r.state, r.reply.as_str(), r.proposal.unwrap().text.as_str()), (State::Working, "Shortening…", "Kilns fire clay."));
+        assert_eq!(hub.request(id).unwrap().review(), None, "nothing to review while it streams");
+        hub.answer(id, Some("Done."), None, true).unwrap();
+        assert_eq!(hub.request(id).unwrap().review(), Some(Review::Proposal), "the last proposal is the final one");
+        // A huge proposal is cut at a character boundary.
+        let big = hub.ask("expand", sel("x"), json!({})).unwrap();
+        hub.listen(Duration::from_millis(10), || true).unwrap();
+        hub.answer(big, None, proposal(&"é".repeat(MAX_PROPOSAL_BYTES)), false).unwrap();
+        assert!(hub.request(big).unwrap().proposal.unwrap().text.len() <= MAX_PROPOSAL_BYTES);
+        // Answer only: no proposal.
+        let explain = hub.ask_with("", crate::agent_actions::find("explain").as_ref(), sel("glaze"), json!({})).unwrap();
+        let r = hub.listen(Duration::from_millis(10), || true).unwrap();
+        assert_eq!(r.to_json()["proposalFormats"], json!([]));
+        assert!(hub.answer(explain, None, proposal("x"), true).unwrap_err().contains("answer only"));
+        // Edited already: no proposal on top.
+        let edited = hub.ask("fix", sel("teh"), json!({})).unwrap();
+        hub.listen(Duration::from_millis(10), || true).unwrap();
+        hub.add_revisions(edited, [3, 4, 3]);
+        assert_eq!(hub.request(edited).unwrap().revisions, vec![3, 4]);
+        assert!(hub.answer(edited, None, proposal("the"), true).unwrap_err().contains("already changed the document"));
+        // Retry: the same request again, saying which one it retries; the old one is put away.
+        let again = hub.retry(id).unwrap();
+        assert!(hub.request(id).is_none());
+        let r = hub.listen(Duration::from_millis(10), || true).unwrap();
+        assert_eq!((r.id, r.instruction.as_str(), r.retry_of), (again, "shorten", Some(id)));
+        assert_eq!(r.to_json()["retryOf"], id);
+        assert_eq!(r.selection["text"], "Kilns fire the clay slowly.");
+        assert!(r.proposal.is_none() && r.revisions.is_empty());
+        // Proposal params as the control channel gets them.
+        assert_eq!(
+            Proposal::from_params(&json!({"proposal": "a\r\nb", "format": "markdown"})).unwrap(),
+            Some(Proposal { text: "a\nb".into(), markdown: true })
+        );
+        assert_eq!(Proposal::from_params(&json!({"text": "note"})).unwrap(), None);
+        assert!(Proposal::from_params(&json!({"proposal": ["x"]})).is_err());
+        assert!(Proposal::from_params(&json!({"proposal": "x", "format": "html"})).is_err());
+    }
+
+    /// Accept puts the proposal in place of the text the person asked about, wherever the caret
+    /// went meanwhile, as one Undo step and a tracked change by the agent; the person's name and
+    /// Track Changes setting stay theirs. Accepting while the agent still writes is refused.
+    #[test]
+    fn accepting_a_proposal_puts_it_in_place_as_the_agents_tracked_change() {
+        let hub = AgentHub::new(7985, None);
+        let mut a = app_with(&hub, "Kilns fire the clay slowly over many hours.");
+        a.run("select.text", json!({"text": "the clay slowly"})).unwrap();
+        let id = a.run("ui.askAgent", json!({"action": "shorten"})).unwrap()["id"].as_u64().unwrap();
+        hub.listen_as(Duration::from_millis(10), Some("test bot"), || true).unwrap();
+        hub.answer(id, None, proposal("the clay"), false).unwrap();
+        assert!(a.run("ui.askAgent", json!({"accept": id})).unwrap_err().contains("still being worked on"));
+        hub.answer(id, Some("Cut a word."), proposal("clay"), true).unwrap();
+        // The person moved on; the proposal still goes where they asked.
+        a.run("caret.docEnd", json!({})).unwrap();
+        let depth = a.session.undo_depth();
+        let r = a.run("ui.askAgent", json!({"accept": id})).unwrap();
+        assert_eq!((r["accepted"].as_u64(), r["author"].as_str()), (Some(id), Some("Agent (test bot)")));
+        assert_eq!(a.session.undo_depth(), depth + 1, "one Undo step");
+        assert!(a.session.doc.revisions.iter().all(|r| r.author == "Agent (test bot)"), "tracked as the agent");
+        assert!(!a.session.doc.settings.track_changes && !a.session.force_tracking && a.session.revision_base == 0);
+        assert_eq!(a.session.author, "Ana Writer");
+        assert!(hub.request(id).is_none(), "accepted: put away");
+        a.run("review.acceptAll", json!({})).unwrap();
+        assert_eq!(body(&a), "Kilns fire clay over many hours.");
+        a.run("edit.undo", json!({})).unwrap();
+        a.run("edit.undo", json!({})).unwrap();
+        assert_eq!(body(&a), "Kilns fire the clay slowly over many hours.", "one Undo takes the whole proposal back");
+        // insertBelow: new paragraphs after the selection's, which stays; Markdown brings its list.
+        a.run("select.text", json!({"text": "Kilns"})).unwrap();
+        let id = a.run("ui.askAgent", json!({"action": "summarize"})).unwrap()["id"].as_u64().unwrap();
+        hub.listen(Duration::from_millis(10), || true).unwrap();
+        hub.answer(id, None, Some(Proposal { text: "- slow firing\n- even heat".into(), markdown: true }), true).unwrap();
+        let depth = a.session.undo_depth();
+        a.run("ui.askAgent", json!({"accept": id})).unwrap();
+        assert_eq!(a.session.undo_depth(), depth + 1);
+        let d = a.session.run("document.inspect", &json!({})).unwrap();
+        let blocks = d["blocks"].as_array().unwrap();
+        let texts: Vec<&str> = blocks.iter().filter_map(|b| b["text"].as_str()).collect();
+        assert_eq!(texts, vec!["Kilns fire the clay slowly over many hours.", "slow firing", "even heat"], "{d}");
+        assert!(blocks.iter().filter(|b| b["text"] == "slow firing").all(|b| !b["list"].is_null()), "a list item: {d}");
+    }
+
+    /// The text changed since the request: found again when it is in one place only, else Accept
+    /// is refused, and the document, the selection and Undo are as they were.
+    #[test]
+    fn accept_finds_the_text_again_or_says_it_changed() {
+        let hub = AgentHub::new(7985, None);
+        let mut a = app_with(&hub, "Kilns fire clay.");
+        a.run("select.text", json!({"text": "clay"})).unwrap();
+        let id = a.run("ui.askAgent", json!({"instruction": "a better word"})).unwrap()["id"].as_u64().unwrap();
+        hub.listen(Duration::from_millis(10), || true).unwrap();
+        hub.answer(id, None, proposal("stoneware"), true).unwrap();
+        // The person typed before it: same text, another place.
+        a.run("caret.docStart", json!({})).unwrap();
+        a.run("text.insert", json!({"text": "Hot "})).unwrap();
+        a.run("ui.askAgent", json!({"accept": id})).unwrap();
+        a.run("review.acceptAll", json!({})).unwrap();
+        assert_eq!(body(&a), "Hot Kilns fire stoneware.");
+        // Now the text is gone (typed over): refused, nothing changes.
+        a.run("select.text", json!({"text": "fire"})).unwrap();
+        let id = a.run("ui.askAgent", json!({"instruction": "stronger"})).unwrap()["id"].as_u64().unwrap();
+        hub.listen(Duration::from_millis(10), || true).unwrap();
+        hub.answer(id, None, proposal("blaze"), true).unwrap();
+        a.run("select.text", json!({"text": "fire"})).unwrap();
+        a.run("text.insert", json!({"text": "heat"})).unwrap();
+        a.run("caret.docEnd", json!({})).unwrap();
+        let (before, depth, sel) = (body(&a), a.session.undo_depth(), a.session.sel.clone());
+        let e = a.run("ui.askAgent", json!({"accept": id})).unwrap_err();
+        assert!(e.contains("has changed since"), "{e}");
+        assert_eq!((body(&a), a.session.undo_depth(), a.session.sel.clone()), (before, depth, sel), "nothing changed");
+        assert!(hub.request(id).is_some(), "still there: Discard or Retry");
+        // Moved, and now twice in the document: which one is unclear, refused too.
+        a.run("select.text", json!({"text": "heat"})).unwrap();
+        let id = a.run("ui.askAgent", json!({"instruction": "warmer"})).unwrap()["id"].as_u64().unwrap();
+        hub.listen(Duration::from_millis(10), || true).unwrap();
+        hub.answer(id, None, proposal("warmth"), true).unwrap();
+        a.run("caret.docStart", json!({})).unwrap();
+        a.run("text.insert", json!({"text": "Some heat. "})).unwrap();
+        assert!(a.run("ui.askAgent", json!({"accept": id})).unwrap_err().contains("has changed since"));
+        assert!(a.run("ui.askAgent", json!({"discard": id})).unwrap()["discarded"] == id);
+        assert!(hub.request(id).is_none());
+    }
+
+    /// The agent's own edits: Accept makes exactly this request's tracked changes final, Discard
+    /// rejects exactly them, one Undo step each; another request's changes and the person's stay.
+    /// A request with a proposal takes no edits.
+    #[test]
+    fn accept_and_discard_resolve_only_the_requests_own_edits() {
+        let hub = AgentHub::new(7985, None);
+        let mut a = app_with(&hub, "Kilns fire clay. Glazes melt.");
+        a.run("select.text", json!({"text": "clay"})).unwrap();
+        let first = a.run("ui.askAgent", json!({"instruction": "better word"})).unwrap()["id"].as_u64().unwrap();
+        hub.listen_as(Duration::from_millis(10), Some("bot"), || true).unwrap();
+        assert_eq!(exec_for(&mut a, first, "select.text", json!({"text": "clay"}))["ok"], true);
+        assert_eq!(exec_for(&mut a, first, "text.insert", json!({"text": "stoneware"}))["ok"], true);
+        hub.reply(first, "Changed one word.", true).unwrap();
+        a.run("select.text", json!({"text": "Glazes"})).unwrap();
+        let second = a.run("ui.askAgent", json!({"instruction": "better word"})).unwrap()["id"].as_u64().unwrap();
+        hub.listen_as(Duration::from_millis(10), Some("bot"), || true).unwrap();
+        exec_for(&mut a, second, "select.text", json!({"text": "Glazes"}));
+        exec_for(&mut a, second, "text.insert", json!({"text": "Slips"}));
+        hub.reply(second, "Changed one word.", true).unwrap();
+        let (r1, r2) = (hub.request(first).unwrap(), hub.request(second).unwrap());
+        assert_eq!((r1.review(), r2.review()), (Some(Review::Edits), Some(Review::Edits)));
+        assert!(r1.revisions.iter().all(|r| !r2.revisions.contains(r)), "each request has its own revisions");
+        assert!(hub.answer(first, None, proposal("x"), true).is_err());
+        assert_eq!(body(&a), "Kilns fire stonewareclay. SlipsGlazes melt.");
+        let depth = a.session.undo_depth();
+        a.run("ui.askAgent", json!({"accept": first})).unwrap();
+        assert_eq!(body(&a), "Kilns fire stoneware. SlipsGlazes melt.", "only the first request's changes are final");
+        a.run("ui.askAgent", json!({"discard": second})).unwrap();
+        assert_eq!(body(&a), "Kilns fire stoneware. Glazes melt.");
+        assert_eq!(a.session.undo_depth(), depth + 2, "one Undo step each");
+        assert!(hub.requests().is_empty());
+        // With a proposal, the agent's edits are refused.
+        a.run("select.text", json!({"text": "melt"})).unwrap();
+        let id = a.run("ui.askAgent", json!({"instruction": "stronger"})).unwrap()["id"].as_u64().unwrap();
+        hub.listen(Duration::from_millis(10), || true).unwrap();
+        hub.answer(id, None, proposal("flow"), false).unwrap();
+        let r = exec_for(&mut a, id, "text.insert", json!({"text": "run"}));
+        assert!(r["error"].as_str().unwrap_or("").contains("has a proposal"), "{r}");
+        assert_eq!(exec_for(&mut a, id, "select.text", json!({"text": "melt"}))["ok"], true, "reading and selecting still work");
+        // Retry after edits: they are rejected (one Undo step) and the request goes out again.
+        hub.cancel(id);
+        a.run("select.text", json!({"text": "Glazes"})).unwrap();
+        let id = a.run("ui.askAgent", json!({"instruction": "plural"})).unwrap()["id"].as_u64().unwrap();
+        hub.listen(Duration::from_millis(10), || true).unwrap();
+        exec_for(&mut a, id, "select.text", json!({"text": "Glazes"}));
+        exec_for(&mut a, id, "text.insert", json!({"text": "Glaze"}));
+        hub.reply(id, "Done.", true).unwrap();
+        let new = a.run("ui.askAgent", json!({"retry": id})).unwrap()["id"].as_u64().unwrap();
+        assert_eq!(body(&a), "Kilns fire stoneware. Glazes melt.", "the first try is rejected");
+        assert_eq!(hub.listen(Duration::from_millis(10), || true).map(|r| r.retry_of), Some(Some(id)));
+        assert!(a.run("ui.askAgent", json!({"accept": new})).is_err(), "nothing to accept yet");
+        assert!(a.run("ui.askAgent", json!({"accept": "x"})).is_err());
+    }
+
+    /// The bubble: the proposal grows as the agent writes it; once done, Accept, Discard and Retry
+    /// show, Accept has the keyboard (Enter accepts), Escape discards and Ctrl+R asks again.
+    #[test]
+    fn the_bubble_streams_the_proposal_and_takes_enter_escape_and_ctrl_r() {
+        use egui_kittest::kittest::Queryable;
+        let hub = AgentHub::new(7985, None);
+        hub.listen(Duration::from_millis(1), || true);
+        let mut h = window(Some(hub.clone()));
+        h.state_mut().run("select.text", json!({"text": "the clay slowly"})).unwrap();
+        h.state_mut().run("ui.askAgent", json!({})).unwrap();
+        steps(&mut h);
+        h.event(egui::Event::Text("shorter".into()));
+        steps(&mut h);
+        key(&mut h, Key::Enter, Modifiers::NONE);
+        let r = hub.listen(Duration::from_millis(10), || true).unwrap();
+        hub.answer(r.id, Some("Writing…"), proposal("the clay"), false).unwrap();
+        steps(&mut h);
+        assert!(h.query_by_label_contains("the clay").is_some(), "the partial proposal shows");
+        assert_eq!(h.query_all_by_label("Accept").count(), 0, "nothing to accept while it streams");
+        hub.answer(r.id, Some("Shorter."), proposal("the clay, slowly"), true).unwrap();
+        steps(&mut h);
+        for label in ["Accept", "Discard", "Retry"] {
+            assert_eq!(h.query_all_by_label(label).count(), 1, "{label}");
+        }
+        key(&mut h, Key::Enter, Modifiers::NONE);
+        assert!(hub.request(r.id).is_none(), "Enter accepted");
+        assert!(h.state().ask_agent.bubble.is_none());
+        h.state_mut().run("review.acceptAll", json!({})).unwrap();
+        assert_eq!(h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body), "Kilns fire the clay, slowly over many hours.");
+
+        // Escape discards: the document doesn't change.
+        h.state_mut().run("select.text", json!({"text": "Kilns"})).unwrap();
+        let id = h.state_mut().run("ui.askAgent", json!({"instruction": "warmer"})).unwrap()["id"].as_u64().unwrap();
+        h.state_mut().ask_agent.bubble = Some(Bubble { request: Some(id), ..Bubble::at(h.state().session.sel.ordered().1) });
+        hub.listen(Duration::from_millis(10), || true).unwrap();
+        hub.answer(id, None, proposal("Ovens"), true).unwrap();
+        steps(&mut h);
+        key(&mut h, Key::Escape, Modifiers::NONE);
+        assert!(hub.request(id).is_none() && h.state().ask_agent.bubble.is_none());
+        assert!(h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body).starts_with("Kilns"), "discarded");
+
+        // Ctrl+R asks again; the bubble follows the new request.
+        let id = h.state_mut().run("ui.askAgent", json!({"instruction": "warmer"})).unwrap()["id"].as_u64().unwrap();
+        h.state_mut().ask_agent.bubble = Some(Bubble { request: Some(id), ..Bubble::at(h.state().session.sel.ordered().1) });
+        hub.listen(Duration::from_millis(10), || true).unwrap();
+        hub.answer(id, None, proposal("Ovens"), true).unwrap();
+        steps(&mut h);
+        key(&mut h, Key::R, Modifiers::COMMAND);
+        let again = hub.listen(Duration::from_millis(10), || true).expect("asked again");
+        assert_eq!(again.retry_of, Some(id));
+        assert_eq!(h.state().ask_agent.bubble.as_ref().and_then(|b| b.request), Some(again.id));
+
+        // A key pressed while the agent works: the result doesn't take the keyboard, Enter is the
+        // document's again.
+        hub.answer(again.id, Some("…"), None, false).unwrap();
+        steps(&mut h);
+        key(&mut h, Key::ArrowRight, Modifiers::NONE);
+        hub.answer(again.id, None, proposal("Ovens"), true).unwrap();
+        steps(&mut h);
+        key(&mut h, Key::Enter, Modifiers::NONE);
+        assert!(hub.request(again.id).is_some(), "not accepted by a key meant for the document");
+        // Nor discarded by an Escape meant for the document: the bubble closes, the result waits
+        // in the corner card, with its buttons.
+        key(&mut h, Key::Escape, Modifiers::NONE);
+        assert!(h.state().ask_agent.bubble.is_none() && hub.request(again.id).is_some());
+        assert_eq!(h.query_all_by_label("Accept").count(), 1, "the corner card offers Accept");
+        let discard = h.get_by_label("Discard").rect().center();
+        click(&mut h, discard);
+        assert!(hub.request(again.id).is_none());
     }
 }
