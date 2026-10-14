@@ -230,6 +230,7 @@ fn styles_and_lists_round_trip() {
         hidden: false,
         builtin: false,
         locked: true,
+        default: false,
         table: None,
     });
     d.styles.upsert(Style {
@@ -278,7 +279,7 @@ fn tables_with_merges_round_trip() {
     t.props.look = TableLook { header_row: true, total_row: true, banded_rows: false, first_column: false, last_column: true, banded_columns: true };
     t.props.shading = Some(Rgb(1, 1, 1));
     t.props.caption = Some("Sales".into());
-    t.rows[0].props = RowProps { height: Some(20.0), height_rule: HeightRule::Exact, header: true, cant_split: true, fmt_change: None };
+    t.rows[0].props = RowProps { height: Some(20.0), height_rule: HeightRule::Exact, header: true, cant_split: true, ..Default::default() };
     t.rows[1].props = RowProps { height: Some(15.0), height_rule: HeightRule::AtLeast, ..Default::default() };
     t.merge(0, 0, 0, 1); // horizontal
     t.merge(1, 2, 2, 2); // vertical
@@ -321,8 +322,12 @@ fn sections_headers_footers_round_trip() {
     let mut d = Document::new();
     let page = |instr: &str| {
         let mut p = Paragraph::with_text("Page ", CharProps::default());
-        p.insert_object(5, InlineObject::Field { instr: instr.into(), result: "1".into(), locked: false, code: false }, &CharProps::default())
-            .unwrap();
+        p.insert_object(
+            5,
+            InlineObject::Field { instr: instr.into(), result: "1".into(), locked: false, code: false, form: String::new() },
+            &CharProps::default(),
+        )
+        .unwrap();
         p
     };
     let h1 = d.add_part(PartKind::Header, vec![para_block(Paragraph::with_text("Header one", CharProps::default()))]);
@@ -369,7 +374,7 @@ fn sections_headers_footers_round_trip() {
     assert_eq!(part_text(&r, secs[0].1.headers.first), "First page header");
     assert_eq!(secs[0].1.headers.default, secs[1].1.headers.default, "shared header part stays shared");
     let fp = r.parts.get(&secs[0].1.footers.default.unwrap()).unwrap().blocks[0].as_para().unwrap();
-    assert_eq!(fp.objects, vec![InlineObject::Field { instr: "PAGE".into(), result: "1".into(), locked: false, code: false }]);
+    assert_eq!(fp.objects, vec![InlineObject::Field { instr: "PAGE".into(), result: "1".into(), locked: false, code: false, form: String::new() }]);
     assert_eq!(part_text(&r, secs[1].1.footers.default), "Page 1");
     assert_eq!(r.parts.get(&secs[0].1.headers.default.unwrap()).unwrap().kind, PartKind::Header);
 }
@@ -470,11 +475,27 @@ fn comments_round_trip() {
     let c1 = d.add_part(PartKind::Comment, vec![para_block(Paragraph::with_text("Done.", CharProps::default()))]);
     d.comments.insert(
         0,
-        Comment { author: "Ann".into(), initials: "A".into(), date: "2026-01-02T03:04:05Z".into(), parent: None, resolved: true, part: c0 },
+        Comment {
+            author: "Ann".into(),
+            initials: "A".into(),
+            date: "2026-01-02T03:04:05Z".into(),
+            parent: None,
+            resolved: true,
+            part: c0,
+            ..Default::default()
+        },
     );
     d.comments.insert(
         1,
-        Comment { author: "Ben".into(), initials: "B".into(), date: "2026-01-03T00:00:00Z".into(), parent: Some(0), resolved: false, part: c1 },
+        Comment {
+            author: "Ben".into(),
+            initials: "B".into(),
+            date: "2026-01-03T00:00:00Z".into(),
+            parent: Some(0),
+            resolved: false,
+            part: c1,
+            ..Default::default()
+        },
     );
     let mut p = Paragraph::with_text("commented text", CharProps::default());
     p.insert_object(0, InlineObject::CommentStart { id: 0 }, &CharProps::default()).unwrap();
@@ -706,7 +727,13 @@ fn toc_field_wraps_its_entries() {
         let end = head.len();
         head.insert_object(
             end,
-            InlineObject::Field { instr: "TOC \\o \"1-2\" \\h \\z \\u".into(), result: String::new(), locked: false, code: false },
+            InlineObject::Field {
+                instr: "TOC \\o \"1-2\" \\h \\z \\u".into(),
+                result: String::new(),
+                locked: false,
+                code: false,
+                form: String::new(),
+            },
             &CharProps::default(),
         )
         .unwrap();
@@ -791,7 +818,7 @@ fn toc_field_skips_nested_stories() {
     let end = head.len();
     head.insert_object(
         end,
-        InlineObject::Field { instr: "TOC \\o \"1-1\" \\h \\z \\u".into(), result: String::new(), locked: false, code: false },
+        InlineObject::Field { instr: "TOC \\o \"1-1\" \\h \\z \\u".into(), result: String::new(), locked: false, code: false, form: String::new() },
         &CharProps::default(),
     )
     .unwrap();
@@ -830,7 +857,8 @@ fn tracked_changes_round_trip() {
     let p = para_runs(&[("kept ", CharProps::default()), ("added\t", ins.clone()), ("removed", del.clone()), ("gone", both.clone())]);
     let mut p = p;
     let end = p.len();
-    p.insert_object(end, InlineObject::Field { instr: "DATE".into(), result: "today".into(), locked: false, code: false }, &del).unwrap();
+    p.insert_object(end, InlineObject::Field { instr: "DATE".into(), result: "today".into(), locked: false, code: false, form: String::new() }, &del)
+        .unwrap();
     d.body = vec![para_block(p.clone())];
     let r = rt(&d);
     assert_eq!(r.revisions, d.revisions);
@@ -877,9 +905,9 @@ fn tracked_paragraph_marks_round_trip() {
 fn fields_and_special_chars_round_trip() {
     let mut p = Paragraph::with_text("a\tb\nc\u{000C}d\u{000E}e\u{2011}f\u{00AD}g  spaced  ", CharProps::default());
     let fields = [
-        InlineObject::Field { instr: "PAGE".into(), result: "4".into(), locked: false, code: false },
-        InlineObject::Field { instr: "DATE \\@ \"M/d/yyyy\"".into(), result: "1/2/2026".into(), locked: true, code: false },
-        InlineObject::Field { instr: "NUMPAGES".into(), result: String::new(), locked: false, code: false },
+        InlineObject::Field { instr: "PAGE".into(), result: "4".into(), locked: false, code: false, form: String::new() },
+        InlineObject::Field { instr: "DATE \\@ \"M/d/yyyy\"".into(), result: "1/2/2026".into(), locked: true, code: false, form: String::new() },
+        InlineObject::Field { instr: "NUMPAGES".into(), result: String::new(), locked: false, code: false, form: String::new() },
     ];
     for f in &fields {
         let end = p.len();
@@ -1152,6 +1180,28 @@ fn rotated_drawing_canvas_round_trips() {
 }
 
 #[test]
+fn table_contextual_spacing_compatibility_flag_round_trips() {
+    for mode in [11, 12, 14, 15] {
+        for allow in [false, true] {
+            let mut d = Document::new();
+            d.settings.compat_mode = mode;
+            d.settings.allow_space_of_same_style_in_table = allow;
+            let r = rt(&d);
+            assert_eq!(r.settings.allow_space_of_same_style_in_table, allow);
+            assert_eq!(r.settings.compat_mode, mode);
+            if allow {
+                let bytes = wordcraft_docx::write(&d).unwrap();
+                let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+                let mut xml = String::new();
+                std::io::Read::read_to_string(&mut zip.by_name("word/settings.xml").unwrap(), &mut xml).unwrap();
+                // CT_Compat requires the boolean option before compatSetting.
+                assert!(xml.find("<w:allowSpaceOfSameStyleInTable").unwrap() < xml.find("<w:compatSetting").unwrap());
+            }
+        }
+    }
+}
+
+#[test]
 fn compatibility_mode_round_trips() {
     // New documents are Word 2013+ documents; an older file keeps its mode, so saving it doesn't
     // change how Word lays it out.
@@ -1193,6 +1243,31 @@ fn attached_template_and_link_styles_round_trip() {
     let plain = rt(&Document::new());
     assert_eq!(plain.settings.attached_template, None);
     assert!(!plain.settings.link_styles);
+}
+
+/// #995: the zoom a document was saved at (`w:zoom`), One Page (`fullPage`) included, is read
+/// and written back.
+#[test]
+fn zoom_round_trips() {
+    let settings = |bytes: &[u8]| {
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut zip.by_name("word/settings.xml").unwrap(), &mut xml).unwrap();
+        xml
+    };
+    let plain = wordcraft_docx::write(&Document::new()).unwrap();
+    let xml = settings(&plain);
+    assert!(xml.contains(r#"<w:zoom w:percent="100"/>"#), "{xml}");
+    for (zoom, written) in [
+        (r#"<w:zoom w:val="fullPage" w:percent="62"/>"#, r#"<w:zoom w:val="fullPage" w:percent="62"/>"#),
+        (r#"<w:zoom w:percent="75%"/>"#, r#"<w:zoom w:percent="75"/>"#),
+        (r#"<w:zoom w:val="bestFit" w:percent="99999"/>"#, r#"<w:zoom w:val="bestFit" w:percent="500"/>"#),
+        (r#"<w:zoom w:val="sideways" w:percent="80"/>"#, r#"<w:zoom w:percent="80"/>"#),
+    ] {
+        let file = replace_part(&plain, "word/settings.xml", xml.replace(r#"<w:zoom w:percent="100"/>"#, zoom).as_bytes());
+        let back = settings(&wordcraft_docx::write(&wordcraft_docx::read(&file).unwrap()).unwrap());
+        assert!(back.contains(written), "{zoom}: {back}");
+    }
 }
 
 #[test]
@@ -1926,7 +2001,7 @@ fn wrap_polygons_round_trip() {
     let got = paras(&r)[0];
     let floats: Vec<Float> = got.objects.iter().filter_map(|o| o.frame().map(|(_, _, f)| f.clone())).collect();
     assert_eq!(floats[0], edited);
-    let ellipse = WrapPolygon::from_unit(false, &shape_outline(ShapeKind::Ellipse, 80.0, 40.0).unwrap());
+    let ellipse = WrapPolygon::from_unit(false, &shape_outline(ShapeKind::Ellipse, 80.0, 40.0, None).unwrap());
     assert_eq!(floats[1].wrap, Wrap::Through);
     assert_eq!(floats[1].wrap_polygon.as_deref(), ellipse.as_ref());
 }
@@ -1949,7 +2024,7 @@ fn enclosed_characters_round_trip_in_words_structure() {
         let off = p.len();
         p.insert_object(
             off,
-            InlineObject::Field { instr: e.instr(), result: "字".into(), locked: false, code: false },
+            InlineObject::Field { instr: e.instr(), result: "字".into(), locked: false, code: false, form: String::new() },
             &CharProps { size, ..Default::default() },
         )
         .unwrap();
@@ -2213,4 +2288,25 @@ fn replace_part(zip_bytes: &[u8], name: &str, data: &[u8]) -> Vec<u8> {
         }
     }
     out.finish().unwrap().into_inner()
+}
+
+/// A texture or picture page background (`v:background/v:fill`) survives a save (#999): the image
+/// part, its relationship and the fill attributes.
+#[test]
+fn page_background_picture_round_trips() {
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 150, 100, 255]))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let mut d = Document::new();
+    d.settings.page_color = Some(Rgb(0xFF, 0xFF, 0xCC));
+    d.media.insert("paper.png".into(), Arc::new(png.clone()));
+    d.settings.page_picture = Some(wordcraft_doc::PagePicture { media: "paper.png".into(), fill_type: "tile".into(), title: "Paper".into() });
+    let r = rt(&d);
+    let pic = r.settings.page_picture.as_ref().expect("picture kept");
+    assert_eq!((pic.fill_type.as_str(), pic.title.as_str()), ("tile", "Paper"));
+    assert_eq!(r.media.get(&pic.media).map(|b| b.as_slice()), Some(png.as_slice()));
+    assert_eq!(r.settings.page_color, d.settings.page_color);
+    // Saved again, it is still there.
+    assert!(rt(&r).settings.page_picture.is_some());
 }

@@ -13,7 +13,7 @@ use wordcraft_doc::{Document, Paragraph};
 use wordcraft_fonts::FaceRef;
 
 use crate::NumeralMode;
-use crate::fields::{FIELD_SHADING, FieldCtx, field_code_text, field_text};
+use crate::fields::{FIELD_SHADING, FieldCtx, field_code_text, field_text_on};
 
 /// How a run set in one of Word's symbol fonts (Symbol, Wingdings, Wingdings 2/3, Webdings)
 /// shows its characters. Those fonts are proprietary and usually missing: a substitute has other
@@ -192,6 +192,10 @@ impl VisCl {
     }
 }
 
+/// Width of a paragraph mark's box, points: what a selection running past the paragraph's end
+/// highlights, and how much room the mark takes for assistive technology.
+pub const PARA_MARK_WIDTH: f32 = 5.0;
+
 impl Line {
     /// Left edge of cluster `k` (a paragraph cluster index on this line).
     pub fn cl_left(&self, k: usize) -> Option<f32> {
@@ -223,6 +227,13 @@ impl Line {
     pub fn visual_end_x(&self) -> f32 {
         let end = self.end_x();
         if self.rtl { self.vis.iter().map(|v| v.x).fold(end, f32::min) } else { self.vis.iter().map(|v| v.x + v.w).fold(end, f32::max) }
+    }
+    /// The box of the mark ending the line (its paragraph mark or line break) as its left edge and
+    /// width: [`PARA_MARK_WIDTH`] at the line's visual end, past the text in a left-to-right
+    /// paragraph and before it in a right-to-left one.
+    pub fn mark_box(&self) -> (f32, f32) {
+        let x = self.visual_end_x();
+        (if self.rtl { x - PARA_MARK_WIDTH } else { x }, PARA_MARK_WIDTH)
     }
     /// x where the hyphen of a hyphenated line (advance `adv`) is drawn.
     pub fn hyphen_x(&self, adv: f32) -> f32 {
@@ -263,6 +274,8 @@ impl Line {
 #[derive(Clone, Debug)]
 pub struct Label {
     pub text: String,
+    /// Maximum line ascent of every shaped font in the label, including its leading.
+    pub ascent: f32,
     /// Style of the label's last run (the suffix space and the bidi tests measure with it).
     pub style: u16,
     pub glyphs: Vec<Glyph>,
@@ -512,6 +525,18 @@ impl SegKey {
     fn same(&self, o: &SegKey) -> bool {
         self.face.map(|f| f.id()) == o.face.map(|f| f.id()) && self.small == o.small && self.complex == o.complex && self.rtl == o.rtl
     }
+}
+
+/// The capital All Caps and Small Caps draw for `c`: one character in, one out (ß draws as S).
+fn upper_char(c: char) -> char {
+    c.to_uppercase().next().unwrap_or(c)
+}
+
+/// The character drawn for `c` in a run formatted `rc`: All Caps capitalises every letter,
+/// Small Caps the lowercase ones (as the shaper draws them). The PDF text layer uses it so
+/// the text read back is the text shown (#1473).
+pub(crate) fn caps_char(rc: &ResolvedChar, c: char) -> char {
+    if rc.caps || (rc.small_caps && c.is_lowercase()) { upper_char(c) } else { c }
 }
 
 /// Combining marks and joiners (bidi classes NSM, BN: harakat, ZWNJ, ZWJ) belong to the
@@ -817,7 +842,7 @@ impl<'a> Builder<'a> {
                 if d != c {
                     d
                 } else if upper {
-                    c.to_uppercase().next().unwrap_or(c)
+                    upper_char(c)
                 } else {
                     c
                 }
@@ -1286,8 +1311,10 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
                     obj_index += 1;
                     match p.objects.get(k) {
                         Some(o) if o.is_drawing() => {
+                            // A hidden one takes no room, and with no height its line doesn't draw it.
                             if let Some((w, h, float)) = o.frame()
                                 && float.wrap == wordcraft_doc::para::Wrap::Inline
+                                && !float.hidden
                             {
                                 // A picture wider than the line keeps its size, as in Word: it runs past
                                 // the margin and the page edge clips it (see `ParaEnv::fit_objects`).
@@ -1315,7 +1342,7 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
                                 match wordcraft_doc::eq::parse_overstrike(instr) {
                                     Some(o) => overstrike(&mut b, &o, instr, start, end, &rc, &mut enclosures),
                                     None => {
-                                        let (t, page_dep) = field_text(instr, result, env.fields);
+                                        let (t, page_dep) = field_text_on(instr, result, env.fields, env.fields.page_at(start));
                                         has_page_fields |= page_dep;
                                         b.shape_atomic(&t, start, end, &rc);
                                     }
@@ -1457,15 +1484,21 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
         }
         let mut glyphs = Vec::new();
         let mut runs: Vec<LabelRun> = Vec::new();
+        let mut ascent = 0.0f32;
         let mut x = 0.0;
         let mut style = mark_style;
         for c in &cl {
             style = c.style;
+            if let Some(st) = b.styles.get(style as usize) {
+                let a = wordcraft_fonts::word::line_metrics(&st.face).0 * st.size as f64 / st.face.upem.max(1.0);
+                ascent = ascent.max(a as f32 + st.shift.max(0.0));
+            }
             let g0 = glyphs.len();
             for g in b.glyphs.get(c.g0 as usize..c.g1 as usize).into_iter().flatten() {
                 glyphs.push(Glyph { dx: g.dx + x, ..*g });
             }
-            let chars = shown(text.get(c.start..c.end).unwrap_or(""));
+            // A label in an All Caps paragraph reads as the capitals drawn (#1473).
+            let chars: String = shown(text.get(c.start..c.end).unwrap_or("")).chars().map(|ch| caps_char(&rc, ch)).collect();
             match runs.last_mut() {
                 Some(r) if r.style == c.style => {
                     r.glyphs.end = glyphs.len();
@@ -1476,7 +1509,7 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
             x += c.adv;
         }
         b.glyphs.truncate(before_g);
-        Label { text: shown(text), style, glyphs, runs, x: 0.0, width: x }
+        Label { text: shown(text), ascent, style, glyphs, runs, x: 0.0, width: x }
     });
 
     let mut pl = ParaLayout {
@@ -1728,7 +1761,9 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u16, level: Optio
             });
             let shrink = if shrink_spaces && !has_tab { space_w * MAX_SPACE_SHRINK } else { 0.0 };
             let fits = absorbs || x + c.adv <= right_edge + shrink + 0.01 || c.kind == ClKind::Space || c.kind == ClKind::Marker;
-            if !fits && j > c0 {
+            // A line's first item stays on it even when it doesn't fit; markers before it
+            // (a content control's start, a bookmark) take no room and don't count (Word).
+            if !fits && (c0..j).any(|k| pl.clusters.get(k).is_some_and(|c| c.kind != ClKind::Marker)) {
                 // Wrap: back up to the last break opportunity on this line.
                 end = LineEnd::Wrap;
                 // Hyphenate only when the plain break leaves more than the hyphenation zone empty.
@@ -1883,16 +1918,23 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u16, level: Optio
             asc = st.ascent;
             desc = st.descent;
         }
-        // A list label can make the line taller above the baseline, never below it: Word keeps
-        // the text's descent (measured in Word for Windows: a Symbol bullet's taller ascent
-        // counts, a Courier New label's deeper descent doesn't).
+        let text_natural = asc + desc;
+        let text_pictures = if obj_asc > asc { obj_asc + desc } else { 0.0 };
+        let mut label_extra = 0.0;
         if first && let Some(lab) = &pl.label {
-            for st in lab.runs.iter().filter_map(|r| pl.styles.get(r.style as usize)) {
-                asc = asc.max(st.ascent);
+            if !matches!(rp.line_spacing, LineSpacing::Exactly(_)) {
+                // Automatic/minimum spacing keeps text descent. Only the label's ascent
+                // overflow adds room, unscaled by the automatic spacing multiplier.
+                label_extra = (lab.ascent - asc).max(0.0);
+                asc = asc.max(lab.ascent);
+            } else {
+                for st in lab.runs.iter().filter_map(|r| pl.styles.get(r.style as usize)) {
+                    asc = asc.max(st.ascent);
+                    desc = desc.max(st.descent);
+                }
             }
         }
-        // Line spacing scales the text's height, never a picture's: a line is at least as tall
-        // as its tallest picture plus the descent below the baseline.
+        // Keep the picture floor independent of list-label metrics and line-spacing multipliers.
         // shortcut: Word leaves less than a full descent below a line of only pictures (0.5pt to
         // 1.9pt in docxide-pdf's header fixtures case121/case123, where the descent is 3.3pt), and
         // no rule tried so far (none, only the text's descent) matched both; it needs Word probes.
@@ -1902,8 +1944,8 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u16, level: Optio
         let (height, centred) = match (rp.line_spacing, grid) {
             (LineSpacing::Multiple(m), Some(g)) => ((g.snap_height(natural) * m).max(g.snap_height(pictures)), true),
             (LineSpacing::AtLeast(v), Some(g)) => (g.snap_height(natural.max(pictures)).max(v), true),
-            (LineSpacing::Multiple(m), None) => ((natural * m).max(pictures), false),
-            (LineSpacing::AtLeast(v), None) => (natural.max(pictures).max(v), false),
+            (LineSpacing::Multiple(m), None) => ((text_natural * m + label_extra).max(text_pictures), false),
+            (LineSpacing::AtLeast(v), None) => (natural.max(text_pictures).max(v), false),
             (LineSpacing::Exactly(v), _) => (v, false),
         };
         let baseline = if centred {
@@ -1938,6 +1980,15 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u16, level: Optio
         if shift > 0.0 && slack > 0.0 {
             for v in xs.iter_mut().skip(align_from - c0) {
                 *v += shift;
+            }
+            // The list label belongs to the start of the line: it moves with the text (Word keeps
+            // the bullet attached when a list item is centred or aligned to the end). After a tab
+            // stop in the line the label stays, as the text before the tab does.
+            if first
+                && last_tab.is_none()
+                && let Some(lab) = pl.label.as_mut()
+            {
+                lab.x += shift;
             }
         }
         let justify = display.is_none() && ((rp.align == Align::Justify && end == LineEnd::Wrap) || rp.align == Align::Distribute);
@@ -2542,4 +2593,101 @@ pub fn proof_text(p: &wordcraft_doc::Paragraph) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod label_spacing_tests {
+    use super::*;
+
+    // Inject measured metric pairs after shaping so these regressions do not depend on
+    // the fonts installed on the test host. Word for Mac 16.113.3, original Roboto probes.
+    fn measured_label_lines(spacing: LineSpacing, label_metrics: (f32, f32), label_ascent: f32, wrap: bool) -> Vec<Line> {
+        let doc = Document::new();
+        let fields = FieldCtx::default();
+        let level = Level { chr: CharProps { size: Some(24.0), ..Default::default() }, suffix: LevelSuffix::Nothing, ..Default::default() };
+        let env = ParaEnv {
+            doc: &doc,
+            fields: &fields,
+            width: 100.0,
+            label: Some(("•".into(), level.clone())),
+            show_hidden: false,
+            hide_deleted: false,
+            table: None,
+            proofing: None,
+            field_codes: false,
+            grid: Grid::default(),
+            exclusions: &[],
+            eq_number: 0,
+            numeral: crate::NumeralMode::default(),
+            read_line_spacing: None,
+            fit_objects: false,
+        };
+        let mut p = Paragraph::with_text(if wrap { "Alpha probe synthetic business text repeated" } else { "Alpha probe" }, Default::default());
+        p.props.line_spacing = Some(spacing);
+        let mut pl = layout_para(&p, &env);
+        let label = pl.label.as_mut().unwrap();
+        label.ascent = label_ascent;
+        let label_style = label.style;
+        for (i, st) in pl.styles.iter_mut().enumerate() {
+            (st.ascent, st.descent) = if i == label_style as usize { label_metrics } else { (11.1328125, 2.9296875) };
+        }
+        let mark_style = pl.clusters[0].style;
+        break_lines(&mut pl, &env, mark_style, Some(&level));
+        pl.lines
+    }
+
+    #[test]
+    fn large_label_overflow_is_not_multiplied() {
+        for (multiple, expected) in [(1.0, 25.20), (1.25, 28.80), (2.0, 39.36)] {
+            let lines = measured_label_lines(LineSpacing::Multiple(multiple), (22.265625, 5.859375), 22.265625, false);
+            assert!((lines[0].height - expected).abs() <= 0.25, "{multiple}: {} vs {expected}", lines[0].height);
+            if multiple == 1.0 {
+                assert!((lines[0].height - lines[0].baseline - 2.9296875).abs() < 0.001, "label descent must not move the text baseline");
+            }
+        }
+    }
+
+    #[test]
+    fn small_label_descent_does_not_inflate_text_spacing() {
+        let lines = measured_label_lines(LineSpacing::Multiple(1.25), (8.499023, 3.5009766), 9.0, false);
+        assert!((lines[0].height - 17.52).abs() <= 0.25, "{}", lines[0].height);
+    }
+
+    #[test]
+    fn label_leading_and_earlier_font_ascent_are_retained() {
+        // Apple Symbols 24 pt: full leading gives an 18 pt label ascent. The text
+        // pitch is still Roboto 12 pt. A shorter final fallback run must not hide it.
+        for metrics in [(16.998047, 7.001953), (8.0, 3.0)] {
+            let lines = measured_label_lines(LineSpacing::Multiple(1.25), metrics, 18.0, false);
+            assert!((lines[0].height - 24.48).abs() <= 0.25, "{}", lines[0].height);
+        }
+    }
+
+    #[test]
+    fn minimum_spacing_keeps_text_descent_and_label_leading() {
+        for (metrics, ascent, expected) in
+            [((22.265625, 5.859375), 22.265625, 25.20), ((8.499023, 3.5009766), 9.0, 13.92), ((16.998047, 7.001953), 18.0, 20.88)]
+        {
+            let lines = measured_label_lines(LineSpacing::AtLeast(12.0), metrics, ascent, false);
+            assert!((lines[0].height - expected).abs() <= 0.25, "{}", lines[0].height);
+        }
+    }
+
+    #[test]
+    fn labels_keep_fixed_and_minimum_spacing_rules() {
+        for (spacing, expected) in [(LineSpacing::Exactly(24.0), 24.0), (LineSpacing::AtLeast(30.0), 30.0)] {
+            let lines = measured_label_lines(spacing, (22.265625, 5.859375), 22.265625, false);
+            assert!((lines[0].height - expected).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn label_overflow_only_affects_the_first_wrapped_line() {
+        let lines = measured_label_lines(LineSpacing::Multiple(1.25), (22.265625, 5.859375), 22.265625, true);
+        assert!(lines.len() > 1);
+        assert!((lines[0].height - 28.80).abs() <= 0.25);
+        for line in &lines[1..] {
+            assert!((line.height - 17.52).abs() <= 0.25, "{}", line.height);
+        }
+    }
 }

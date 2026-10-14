@@ -1,6 +1,6 @@
 //! WordCraft desktop app.
 //!
-//! Usage: `wordcraft [--control <port>] [--sample] [files…]`
+//! Usage: `wordcraft [--control <port>] [--sample] [files…]`; `--help` prints `USAGE`.
 //!
 //! `--control <port>` (or `WORDCRAFT_CONTROL_PORT`) starts a localhost JSON-lines control server:
 //! `{"id":1,"key":"…","method":"engine.execute","params":{"command":"text.insert","params":{"text":"Hi"}}}`.
@@ -21,6 +21,8 @@ mod graphics;
 mod logging;
 mod print;
 mod region;
+#[cfg(target_os = "macos")]
+mod traffic_lights;
 
 use wordcraft_engine::Session;
 use wordcraft_ui_egui::{
@@ -28,9 +30,9 @@ use wordcraft_ui_egui::{
     window_geometry::{WindowGeometry, take_rescue},
 };
 
-/// The app, the restored window geometry until the first frame has checked it, the control
-/// server's key file (removed on exit), the file dialogs the app asked for and, on macOS, the
-/// documents opened from Finder.
+/// The app, the restored window geometry (or, with none, the default: no position) until the
+/// first frame that knows the monitor has checked it, the control server's key file (removed on
+/// exit), the file dialogs the app asked for and, on macOS, the documents opened from Finder.
 struct App(
     WordApp,
     Option<WindowGeometry>,
@@ -45,10 +47,23 @@ impl eframe::App for App {
         apple_events::poll(&self.4, &mut self.0, ctx);
         self.0.logic(ctx);
         self.3.show(frame);
+        // A window that doesn't fit on its screen (the default size on a laptop) shrinks to fit
+        // there, so all of the scroll bar can be dragged (#1215). Checked on the frame that first
+        // knows the monitor: the off-screen check below takes the pending geometry then.
+        if let Some((pos, size)) = ctx.input(|i| self.1.and_then(|g| g.fit_on_monitor(i.viewport()))) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+        }
         let prev = self.0.ui.window;
         self.0.ui.window = ctx.input(|i| WindowGeometry::track(prev, i.viewport(), i.viewport_rect().size()));
+        // The first frame, once the monitor is known (as `take_rescue` waits for): maximize a
+        // window that opened at its normal size so it never flashed on screen half-opened.
+        let maximize = self.1.and_then(|g| g.maximize_after_open()).filter(|_| ctx.input(|i| i.viewport().monitor_size.is_some()));
         if let Some(pos) = ctx.input(|i| take_rescue(&mut self.1, i.viewport())) {
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+        }
+        if let Some(command) = maximize {
+            ctx.send_viewport_cmd(command);
         }
         // The window's close button: with unsaved changes, ask first (`WordApp::close_requested`).
         let closing = ctx.input(|i| i.viewport().close_requested());
@@ -212,6 +227,7 @@ fn services(file_dialog: file_dialogs::Hook, ctx: &egui::Context) -> Services {
         animations_enabled: Some(animations::hook(ctx)),
         clipboard_text: Some(Box::new(clipboard::text)),
         clipboard_html: Some(Box::new(clipboard::html)),
+        set_clipboard_html: Some(Box::new(clipboard::set_html)),
         clipboard_rtf: Some(Box::new(clipboard::rtf)),
         clipboard_formats: Some(Box::new(clipboard::formats)),
         ..Default::default()
@@ -226,6 +242,20 @@ fn app_icon() -> Option<egui::IconData> {
     let png: &[u8] = include_bytes!("../../../assets/app-icon/hicolor/256x256/apps/ai.storyteller.wordcraft.png");
     eframe::icon_data::from_png_bytes(png).map_err(|e| log::warn!("app icon: {e}")).ok()
 }
+
+const USAGE: &str = "\
+wordcraft — the WordCraft desktop app
+
+USAGE:
+  wordcraft [--sample] [--control PORT] [FILE…]
+
+OPTIONS:
+  --sample            open the sample document
+  --control PORT      start the localhost control server on PORT, for agents and scripts
+                      (or set WORDCRAFT_CONTROL_PORT); see docs/control-protocol.md
+  --version           print the version
+  -h, --help          print this help
+";
 
 /// The commit the build came from (short), or `dev`.
 fn build_sha() -> &'static str {
@@ -246,6 +276,11 @@ fn main() -> eframe::Result {
             "--sample" => sample = true,
             "--version" => {
                 println!("wordcraft {} ({})", env!("CARGO_PKG_VERSION"), build_sha());
+                return Ok(());
+            }
+            // Before the window opens (#968). Unlike `print!`, a closed stdout can't panic.
+            "--help" | "-h" => {
+                let _ = std::io::Write::write_all(&mut std::io::stdout(), USAGE.as_bytes());
                 return Ok(());
             }
             _ => files.push(a),
@@ -327,8 +362,21 @@ fn main() -> eframe::Result {
                 app.session.set_document(doc);
             }
             app.watch_desktop_theme(&cc.egui_ctx);
+            if prefs_enabled()
+                && let Some(dir) = wordcraft_control_key::settings_dir()
+            {
+                let ctx = cc.egui_ctx.clone();
+                if let Err(e) = app.session.enable_recovery(dir.join("recovery"), std::sync::Arc::new(move || ctx.request_repaint())) {
+                    log::warn!("local recovery unavailable: {e}");
+                }
+            }
             app.ui.window = restored;
             app.integrated_titlebar = cfg!(target_os = "macos");
+            #[cfg(target_os = "macos")]
+            if let Some(bar) = traffic_lights::title_bar() {
+                log::info!("title bar: {bar:?}");
+                app.mac_titlebar = bar;
+            }
             let mut key_file = None;
             if let Some(port) = control_port {
                 // Ask Agent's queue, shared by the window and the control channel's connections.
@@ -353,7 +401,8 @@ fn main() -> eframe::Result {
             }
             Ok(Box::new(App(
                 app,
-                restored,
+                // With nothing restored, the window the system placed is checked all the same.
+                Some(restored.unwrap_or_default()),
                 key_file,
                 dialogs,
                 #[cfg(target_os = "macos")]

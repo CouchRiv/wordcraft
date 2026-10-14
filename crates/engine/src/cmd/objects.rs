@@ -107,7 +107,12 @@ pub fn specs() -> Vec<CommandSpec> {
             let b = p::f32(v, "brightness").unwrap_or(0.0).clamp(-100.0, 100.0);
             let c = p::f32(v, "contrast").unwrap_or(0.0).clamp(-100.0, 100.0);
             let sharpen = p::f32(v, "sharpen").unwrap_or(0.0).clamp(-100.0, 100.0);
-            adjust(s, move |img| {
+            // Absolute from the original (like transparency): re-setting all three to 0
+            // restores the original pixels instead of stacking on the last pass.
+            let (_, o) = selected(s).ok_or_else(|| CmdError::Disabled("no picture".into()))?;
+            let InlineObject::Image { media, .. } = o else { return Err(CmdError::Disabled("not a picture".into())) };
+            let base = s.originals.get(&media).cloned().unwrap_or(media.clone());
+            adjust_media(s, &base, move |img| {
                 let mut img = img;
                 if b != 0.0 {
                     img = image::DynamicImage::ImageRgba8(image::imageops::colorops::brighten(&img, (b * 2.55) as i32));
@@ -128,7 +133,11 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("picture.color", "Color", "Picture Format › Adjust", |s, v| {
             let mode = p::str(v, "mode").unwrap_or("grayscale").to_string();
             let sat = p::f32(v, "saturation").unwrap_or(100.0);
-            adjust(s, move |img| recolor(img, &mode, sat))
+            // Absolute from the original (like transparency): saturation 100 restores it.
+            let (_, o) = selected(s).ok_or_else(|| CmdError::Disabled("no picture".into()))?;
+            let InlineObject::Image { media, .. } = o else { return Err(CmdError::Disabled("not a picture".into())) };
+            let base = s.originals.get(&media).cloned().unwrap_or(media.clone());
+            adjust_media(s, &base, move |img| recolor(img, &mode, sat))
         })
         .params(r#"{"mode": "grayscale|sepia|washout|blackAndWhite|saturation|tint", "saturation"?: 0..400}"#)
         .when(has_picture),
@@ -176,7 +185,15 @@ pub fn specs() -> Vec<CommandSpec> {
         .when(has_picture),
         CommandSpec::new("picture.transparency", "Transparency", "Picture Format › Adjust", |s, v| {
             let t = p::f32(v, "percent").unwrap_or(50.0).clamp(0.0, 100.0);
-            adjust(s, move |img| {
+            // Absolute, not compounding: 0% is always the original pixels fully opaque.
+            // The base is the pre-edit original (kept for Reset Picture), so dragging a
+            // slider back and forth never fades what a previous pass already faded.
+            // (Combining with other pixel edits then re-setting transparency drops those
+            // edits; a full live-effect stack is future work.)
+            let (_, o) = selected(s).ok_or_else(|| CmdError::Disabled("no picture".into()))?;
+            let InlineObject::Image { media, .. } = o else { return Err(CmdError::Disabled("not a picture".into())) };
+            let base = s.originals.get(&media).cloned().unwrap_or(media.clone());
+            adjust_media(s, &base, move |img| {
                 let mut rgba = img.to_rgba8();
                 for px in rgba.pixels_mut() {
                     px.0[3] = (px.0[3] as f32 * (1.0 - t / 100.0)) as u8;
@@ -316,6 +333,9 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("arrange.selectionPane", "Selection Pane", "Layout › Arrange", objects_list).pure(),
         CommandSpec::new("arrange.bounds", "Move or Resize", "Layout › Arrange", bounds)
             .params(r#"{"width"?: pt, "height"?: pt, "x"?: pt, "y"?: pt, "page"?: n}  (x/y: the top-left on page `page` (0-based, default its page); moving an inline object floats it)"#)
+            .when(has_movable),
+        CommandSpec::new("arrange.copyTo", "Copy to", "Layout › Arrange", copy_to)
+            .params(r#"{"x": pt, "y": pt, "page"?: n}  (Ctrl+drag: a copy of the selected object lands with its top-left there and is selected; the original and the clipboard stay as they were)"#)
             .when(has_movable),
         CommandSpec::new("arrange.nudge", "Nudge", "Layout › Arrange", |s, v| {
             let d = |k| p::f32(v, k).unwrap_or(0.0).clamp(-MAX_OFFSET, MAX_OFFSET);
@@ -682,6 +702,24 @@ fn bounds(s: &mut Session, v: &Value) -> CmdResult {
     Ok(json!({"object": serde_json::to_value(o).unwrap_or(Value::Null), "pos": super::pos_json(&pos)}))
 }
 
+/// Ctrl+drag: copy the selected object (a text box gets its own story) and move the copy to
+/// (x, y), leaving the original in place and the clipboard alone. The copy is selected.
+fn copy_to(s: &mut Session, v: &Value) -> CmdResult {
+    let (pos, _) = selected(s).ok_or_else(|| CmdError::Disabled("no picture or shape selected".into()))?;
+    if p::f32(v, "x").is_none() || p::f32(v, "y").is_none() {
+        return Err(CmdError::Params("`x` and `y` are required".into()));
+    }
+    let len = wordcraft_doc::para::OBJ.len_utf8();
+    let end = Pos { off: pos.off + len, ..pos.clone() };
+    let frag = s.doc.copy_range(&pos, &end);
+    s.sel = Selection::caret(end.clone());
+    super::paste::insert(s, frag)?;
+    s.touch(); // lay out the copy before moving it
+    // The copy sits right after the original; select it and move it like a drag would.
+    s.sel = Selection { anchor: end.clone(), focus: Pos { off: end.off + len, ..end } };
+    bounds(s, v)
+}
+
 /// Put the object at `pos` with its top-left at (x, y) on `page` (default: where it is), as a
 /// drag does in Word: it floats (an inline object gets Square wrapping) and anchors to the
 /// paragraph under its top edge, positioned relative to that paragraph's column and top. So the
@@ -701,7 +739,8 @@ fn move_object(s: &mut Session, pos: Pos, page: Option<u64>, x: f32, y: f32, (w,
     // Keep a corner of it on the page.
     let x = x.max(12.0 - w).min(pg.w - 12.0);
     let y = y.max(12.0 - h).min(pg.h.min(MAX_OFFSET) - 12.0);
-    let (anchor, on_page) = match anchor_paragraph(&layout, page, y, story) {
+    // The paragraph under the middle of its top edge: in the column it mostly lands in.
+    let (anchor, on_page) = match anchor_paragraph(&s.doc, &layout, page, (x + w / 2.0, y), story) {
         Some(path) => (Pos { story, path, off: 0 }, false),
         None => (nearest_line(&layout, page, y, story).ok_or_else(|| CmdError::Params("no text on that page to anchor to".into()))?, true),
     };
@@ -801,22 +840,50 @@ fn move_with_text(s: &mut Session, with_text: bool) -> CmdResult {
     Ok(json!({"object": serde_json::to_value(o).unwrap_or(Value::Null)}))
 }
 
-/// The top-level paragraph of `story` under `y` on `page`: the last one starting at or above
-/// it (else the first starting on the page). Body paragraphs come from the page's items;
-/// header/footer ones from its header and footer.
-pub(crate) fn anchor_paragraph(layout: &wordcraft_layout::DocLayout, page: usize, y: f32, story: StoryRef) -> Option<wordcraft_doc::Path> {
+/// The top-level paragraph of `story` under `(x, y)` on `page`: in the column under `x` (from
+/// the section's column geometry), the last one starting at or above `y` (else the first
+/// starting in that column; else, with no paragraph starting in that column, the last starting
+/// at or above `y` anywhere on the page, else the first). Body paragraphs come from the page's
+/// items; header/footer ones from its header and footer. The column matters (#884): layout
+/// places a floating object when it lays out its anchor, so text laid out before that (an
+/// earlier column) can't wrap around it. (Nor do lines continuing a paragraph from the column
+/// before: layout breaks them once, in the column the paragraph starts in.)
+pub(crate) fn anchor_paragraph(
+    doc: &wordcraft_doc::Document,
+    layout: &wordcraft_layout::DocLayout,
+    page: usize,
+    (x, y): (f32, f32),
+    story: StoryRef,
+) -> Option<wordcraft_doc::Path> {
     let pg = layout.pages.get(page)?;
     let items: Box<dyn Iterator<Item = &wordcraft_layout::Placed> + '_> = match story {
         StoryRef::Body => Box::new(pg.items.iter()),
         StoryRef::Part(_) => Box::new(pg.header.iter().chain(pg.footer.iter())),
     };
-    let starts: Vec<(&wordcraft_doc::Path, f32)> = items
+    // Top-level text on the page: (path, left, top, starts the paragraph).
+    let pieces: Vec<(&wordcraft_doc::Path, f32, f32, bool)> = items
         .filter_map(|it| match it {
-            wordcraft_layout::Placed::Lines { story: s, path, l0: 0, y: top, .. } if *s == story && path.depth() == 0 => Some((path, *top)),
+            wordcraft_layout::Placed::Lines { story: s, path, l0, x, y: top, .. } if *s == story && path.depth() == 0 => {
+                Some((path, *x, *top, *l0 == 0))
+            }
             _ => None,
         })
         .collect();
-    starts.iter().rev().find(|(_, top)| *top <= y + 0.5).or(starts.first()).map(|(p, _)| (*p).clone())
+    let starts: Vec<(&wordcraft_doc::Path, f32)> = pieces.iter().filter(|p| p.3).map(|p| (p.0, p.2)).collect();
+    // The page's columns (left, right), from its section's column geometry (headers and footers
+    // span the text area); the column under `x` is the rightmost one starting at or left of it.
+    let boxes = match story {
+        StoryRef::Body => doc.sections().get(pg.section).map(|(_, sp)| sp.column_boxes()).unwrap_or_default(),
+        StoryRef::Part(_) => Vec::new(),
+    };
+    let mut cols: Vec<(f32, f32)> =
+        boxes.iter().map(|(cx, w)| (pg.body.x + cx, pg.body.x + cx + w)).filter(|c| c.0.is_finite() && c.1.is_finite()).collect();
+    cols.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let col_of = |px: f32| cols.iter().rposition(|c| c.0 <= px + 0.5).unwrap_or(0);
+    let col = col_of(x);
+    let in_col: Vec<(&wordcraft_doc::Path, f32)> = pieces.iter().filter(|p| p.3 && col_of(p.1) == col).map(|p| (p.0, p.2)).collect();
+    let pick = |v: &[(&wordcraft_doc::Path, f32)]| v.iter().rev().find(|(_, top)| *top <= y + 0.5).or(v.first()).map(|(p, _)| (*p).clone());
+    pick(&in_col).or_else(|| pick(&starts))
 }
 
 /// The start of the top-level line of `story` on `page` nearest to `y`.
@@ -935,7 +1002,14 @@ fn size(s: &mut Session, v: &Value) -> CmdResult {
 fn adjust(s: &mut Session, f: impl Fn(image::DynamicImage) -> image::DynamicImage) -> CmdResult {
     let (_, o) = selected(s).ok_or_else(|| CmdError::Disabled("no picture".into()))?;
     let InlineObject::Image { media, .. } = o else { return Err(CmdError::Disabled("not a picture".into())) };
-    let bytes = s.doc.media.get(&media).cloned().ok_or_else(|| CmdError::Failed("picture data missing".into()))?;
+    adjust_media(s, &media, f)
+}
+
+/// Like [`adjust`], but decodes `base` (a media key, usually the pre-edit original) instead
+/// of the picture's current bitmap. The result still chains onto the originals map, so Reset
+/// Picture keeps working.
+fn adjust_media(s: &mut Session, base: &str, f: impl Fn(image::DynamicImage) -> image::DynamicImage) -> CmdResult {
+    let bytes = s.doc.media.get(base).cloned().ok_or_else(|| CmdError::Failed("picture data missing".into()))?;
     let img = image::load_from_memory(&bytes).map_err(|e| CmdError::Failed(format!("can't decode the picture: {e}")))?;
     if (img.width() as u64) * (img.height() as u64) > 80_000_000 {
         return Err(CmdError::Failed("picture is too large to edit".into()));
@@ -944,7 +1018,18 @@ fn adjust(s: &mut Session, f: impl Fn(image::DynamicImage) -> image::DynamicImag
     let mut png = Vec::new();
     out.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).map_err(|e| CmdError::Failed(e.to_string()))?;
     let key = s.doc.add_media(png, "png");
-    let orig = s.originals.get(&media).cloned().unwrap_or(media.clone());
+    // Chain onto the ultimate original (the base's, or the current picture's when the base
+    // is itself derived), so Reset Picture always finds it.
+    let cur = selected(s).and_then(|(_, o)| match o {
+        InlineObject::Image { media, .. } => Some(media),
+        _ => None,
+    });
+    let orig = s
+        .originals
+        .get(base)
+        .cloned()
+        .or_else(|| cur.as_ref().and_then(|m| s.originals.get(m).cloned()))
+        .unwrap_or_else(|| cur.clone().unwrap_or_else(|| key.clone()));
     s.originals.entry(key.clone()).or_insert(orig);
     with_obj(s, |o| {
         if let InlineObject::Image { media, .. } = o {
@@ -1342,7 +1427,8 @@ fn objects_list(s: &mut Session, _: &Value) -> CmdResult {
                     InlineObject::Group { .. } => ("group", format!("Group {}", i + 1)),
                     _ => ("object", format!("Object {}", i + 1)),
                 };
-                json!({"index": i, "kind": kind, "name": name, "pos": super::pos_json(&pos), "size": obj_size(&o)})
+                let hidden = o.frame().is_some_and(|(_, _, f)| f.hidden);
+                json!({"index": i, "kind": kind, "name": name, "pos": super::pos_json(&pos), "size": obj_size(&o), "hidden": hidden})
             })
             .collect(),
     ))
@@ -1404,6 +1490,30 @@ mod tests {
         assert_eq!((object_area(&mut s).rect.x, object_area(&mut s).rect.y), (250.0, 300.0), "{insert}");
     }
 
+    /// Ctrl+drag: a copy lands where dropped and is selected; the original stays, the clipboard
+    /// is untouched, and it is one undo step.
+    #[test]
+    fn copy_to_drops_a_copy_and_leaves_the_original() {
+        let mut s = Session::new(wordcraft_doc::Document::new());
+        s.run("text.insert", &json!({"text": "Some text "})).unwrap();
+        s.run("insert.shape", &json!({"kind": "rectangle"})).unwrap();
+        s.run("arrange.bounds", &json!({"width": 100, "height": 60, "page": 0, "x": 100, "y": 200})).unwrap();
+        s.clipboard_text = "keep".into();
+        let count = |s: &Session| s.doc.para(StoryRef::Body, &wordcraft_doc::Path::top(0)).unwrap().objects.len();
+        assert_eq!(count(&s), 1);
+        s.run("arrange.copyTo", &json!({"page": 0, "x": 300, "y": 200})).unwrap();
+        assert_eq!(count(&s), 2);
+        assert_eq!(s.clipboard_text, "keep");
+        let (_, sel) = selected(&s).unwrap();
+        assert!(matches!(sel, InlineObject::Shape { .. }));
+        let at = s.layout().find_object(0, |o| (o.rect.x - 300.0).abs() < 0.5).expect("the copy is at the drop point");
+        assert_eq!(at.pos(), selected(&s).unwrap().0);
+        assert!(s.layout().find_object(0, |o| (o.rect.x - 100.0).abs() < 0.5).is_some(), "the original stays");
+        assert!(s.run("arrange.copyTo", &json!({"page": 0})).is_err());
+        s.run("edit.undo", &json!({})).unwrap();
+        assert_eq!(count(&s), 1);
+    }
+
     #[test]
     fn shapes_can_be_clicked_resized_and_dragged() {
         for kind in ["rectangle", "ellipse", "star", "arrow"] {
@@ -1449,6 +1559,47 @@ mod tests {
         s.run("select.collapse", &json!({"end": true})).unwrap();
         s.run("text.insert", &json!({"text": "x"})).unwrap();
         assert!(s.run("picture.crop", &json!({"left": 0.1})).is_err());
+    }
+
+    /// Transparency is absolute from the original pixels: 80% then 0% is opaque again
+    /// (it used to stay faded), and repeating a value is idempotent. Corrections and color
+    /// re-set the same way: brightness 0 and saturation 100 restore the original.
+    #[test]
+    fn transparency_is_absolute_from_the_original() {
+        let mut s = Session::new(wordcraft_doc::Document::new());
+        let data = super::super::insert::base64_encode(&png(20, 10));
+        s.run("insert.picture", &json!({"data": data})).unwrap();
+        let rgba = |s: &Session| {
+            let (_, o) = selected(s).unwrap();
+            let InlineObject::Image { media, .. } = o else { panic!("a picture") };
+            let bytes = s.doc.media.get(&media).cloned().unwrap();
+            image::load_from_memory(&bytes).unwrap().to_rgba8().pixels().map(|p| p.0).collect::<Vec<_>>()
+        };
+        let alpha = |s: &Session| rgba(s).iter().map(|p| p[3]).collect::<Vec<_>>();
+        let orig = rgba(&s);
+        assert!(orig.iter().all(|p| p[3] == 255));
+        s.run("picture.transparency", &json!({"percent": 80})).unwrap();
+        assert!(alpha(&s).iter().all(|&a| a == 50), "255 * 0.2 truncated");
+        s.run("picture.transparency", &json!({"percent": 0})).unwrap();
+        assert_eq!(rgba(&s), orig, "back to opaque");
+        s.run("picture.transparency", &json!({"percent": 50})).unwrap();
+        let once = rgba(&s);
+        assert!(once.iter().all(|p| p[3] == 127), "255 * 0.5");
+        s.run("picture.transparency", &json!({"percent": 50})).unwrap();
+        assert_eq!(rgba(&s), once, "repeating is idempotent");
+        s.run("picture.corrections", &json!({"brightness": 20})).unwrap();
+        assert_ne!(rgba(&s), orig);
+        s.run("picture.corrections", &json!({"brightness": 0})).unwrap();
+        assert_eq!(rgba(&s), orig, "brightness 0 restores the original");
+        s.run("picture.color", &json!({"mode": "saturation", "saturation": 0})).unwrap();
+        assert!(rgba(&s).iter().all(|p| p[0] == p[1] && p[1] == p[2]), "grayscale");
+        s.run("picture.color", &json!({"mode": "saturation", "saturation": 100})).unwrap();
+        assert!(
+            rgba(&s).iter().zip(orig.iter()).all(|(a, b)| a.iter().zip(b.iter()).all(|(x, y)| (*x as i16 - *y as i16).abs() <= 2)),
+            "saturation 100 restores within float rounding"
+        );
+        s.run("picture.reset", &json!({})).unwrap();
+        assert_eq!(rgba(&s), orig, "reset still finds the original");
     }
 
     /// #513: Wrap Text › Fix Position on Page / Move with Text re-anchor a floating picture
@@ -1808,5 +1959,121 @@ mod tests {
         s.run("table.altText", &json!({"text": ""})).unwrap();
         let t = s.doc.body.iter().find_map(|b| if let wordcraft_doc::Block::Table(t) = &**b { Some(t.clone()) } else { None }).unwrap();
         assert_eq!((t.props.caption.as_deref(), t.props.description.as_deref()), (Some("Prices"), None));
+    }
+
+    /// The lines of `page` beside `r` vertically (top above its bottom, bottom below its top).
+    fn lines_beside(s: &mut Session, page: usize, r: wordcraft_geom::Rect) -> Vec<(f32, f32, f32)> {
+        let layout = s.layout();
+        wordcraft_layout::hit::page_lines(&layout.pages[page], StoryRef::Body)
+            .iter()
+            .filter(|l| l.top < r.bottom() - 0.5 && l.bottom > r.y + 0.5)
+            .map(|l| (l.top, l.left, l.right))
+            .collect()
+    }
+
+    /// #884: a Square-wrapped shape dragged across a two-column page: the text in whichever
+    /// column it lands in wraps around it there, and its old place closes up.
+    #[test]
+    fn dragged_square_shape_wraps_text_in_its_new_column() {
+        let mut s = Session::new(wordcraft_doc::Document::new());
+        s.run("layout.columns", &json!({"count": 2})).unwrap();
+        for i in 0..40 {
+            if i > 0 {
+                s.run("text.newParagraph", &json!({})).unwrap();
+            }
+            s.run("text.insert", &json!({"text": format!("Paragraph {i} has words enough to run over two or three lines of a narrow column.")}))
+                .unwrap();
+        }
+        s.run("caret.docStart", &json!({})).unwrap();
+        s.run("insert.shape", &json!({"kind": "rectangle"})).unwrap();
+        s.run("arrange.bounds", &json!({"width": 80, "height": 60})).unwrap();
+        let cols: Vec<(f32, f32)> = {
+            let layout = s.layout();
+            let mut v: Vec<(f32, f32)> =
+                wordcraft_layout::hit::page_lines(&layout.pages[0], StoryRef::Body).iter().map(|l| (l.left, l.right)).collect();
+            v.sort_by(|a, b| a.0.total_cmp(&b.0));
+            v.dedup_by(|a, b| (a.0 - b.0).abs() < 1.0);
+            v
+        };
+        assert_eq!(cols.len(), 2, "two columns: {cols:?}");
+        let mid = |c: (f32, f32)| (c.0 + c.1) / 2.0 - 40.0;
+        let wrapped = |s: &mut Session, r: wordcraft_geom::Rect| {
+            let beside = lines_beside(s, 0, r);
+            assert!(!beside.is_empty(), "text beside {r:?}");
+            for (top, left, right) in beside {
+                assert!(right <= r.x + 0.5 || left >= r.right() - 0.5, "line at {top} ({left}..{right}) runs into {r:?}");
+            }
+        };
+        let full = |s: &mut Session, r: wordcraft_geom::Rect, c: (f32, f32)| {
+            for (top, left, right) in lines_beside(s, 0, r) {
+                if left < c.1 && right > c.0 {
+                    assert!((left - c.0).abs() < 0.5 && (right - c.1).abs() < 0.5, "line at {top} ({left}..{right}) still kept clear in {c:?}");
+                }
+            }
+        };
+        // Into the second column, then back into the first, then again to the second, lower.
+        for (col, y, from) in [(1, 300.0, None), (0, 200.0, Some(1)), (1, 400.0, Some(0))] {
+            let old = object_area(&mut s).rect;
+            s.run("arrange.bounds", &json!({"page": 0, "x": mid(cols[col]), "y": y})).unwrap();
+            let o = object_area(&mut s);
+            assert_eq!((o.page, o.rect.x, o.rect.y), (0, mid(cols[col]), y), "dropped where asked");
+            wrapped(&mut s, o.rect);
+            if let Some(c) = from {
+                full(&mut s, old, cols[c]);
+            }
+        }
+    }
+
+    /// Two columns of `n` paragraphs.
+    fn two_column_doc(n: usize) -> Session {
+        let mut s = Session::new(wordcraft_doc::Document::new());
+        s.run("layout.columns", &json!({"count": 2})).unwrap();
+        for i in 0..n {
+            if i > 0 {
+                s.run("text.newParagraph", &json!({})).unwrap();
+            }
+            let text = format!("Paragraph {i} has words enough to run over several lines of a narrow column, and then some more words. ");
+            s.run("text.insert", &json!({"text": text.repeat(3)})).unwrap();
+        }
+        s
+    }
+
+    /// The page's columns (left, right) from its section's geometry.
+    fn page_columns(s: &mut Session, page: usize) -> Vec<(f32, f32)> {
+        let layout = s.layout();
+        let pg = &layout.pages[page];
+        let boxes = s.doc.sections()[pg.section].1.column_boxes();
+        boxes.iter().map(|(x, w)| (pg.body.x + x, pg.body.x + x + w)).collect()
+    }
+
+    /// #884 review: mirrored indents shift some paragraphs on even pages; that shift isn't taken
+    /// for a column of its own, so the drop anchors to the paragraph under it, mirrored or not.
+    #[test]
+    fn mirrored_indents_make_no_extra_column() {
+        let mut s = two_column_doc(40);
+        for i in (1..40).step_by(2) {
+            let p = s.doc.para_mut(StoryRef::Body, &wordcraft_doc::Path::top(i)).unwrap();
+            p.props.mirror_indents = Some(true);
+            p.props.indent_right = Some(36.0);
+            p.touch();
+        }
+        s.touch();
+        assert!(s.layout().pages.len() > 1);
+        let cols = page_columns(&mut s, 1);
+        // On page 2, a plain paragraph starting in the first column below a mirrored one.
+        let layout = s.layout();
+        let starts: Vec<(usize, f32, f32)> = layout.pages[1]
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                wordcraft_layout::Placed::Lines { path, l0: 0, x, y, .. } if path.depth() == 0 && *x < cols[1].0 - 0.5 => Some((path.last(), *x, *y)),
+                _ => None,
+            })
+            .collect();
+        assert!(starts.iter().any(|p| p.1 > cols[0].0 + 1.0), "mirrored paragraphs shift right: {starts:?}");
+        let &(plain, _, top) = starts.iter().skip(1).find(|p| p.0 % 2 == 0).unwrap();
+        let mid = (cols[0].0 + cols[0].1) / 2.0;
+        let got = anchor_paragraph(&s.doc, &layout, 1, (mid, top + 1.0), StoryRef::Body);
+        assert_eq!(got, Some(wordcraft_doc::Path::top(plain)));
     }
 }
