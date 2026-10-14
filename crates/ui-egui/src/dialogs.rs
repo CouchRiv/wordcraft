@@ -11,6 +11,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use wordcraft_engine::Password;
+use wordcraft_engine::cmd::mailings::{FilterOp, FilterRule, SortKey};
 
 use crate::WordApp;
 use crate::options::MeasureExt;
@@ -140,6 +141,11 @@ fn special_menu(ui: &mut Ui, extra: &FindExtra) -> Option<&'static str> {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "dialog", rename_all = "camelCase")]
 pub enum Dialog {
+    RenameDocument {
+        name: String,
+        message: String,
+        focus: bool,
+    },
     Font {
         /// The font (Latin text) and the Asian text font, as the font lists name them, and their
         /// values when the dialog opened: OK changes only the ones changed (#505).
@@ -246,6 +252,14 @@ pub enum Dialog {
         grid_was: (u8, u32, u32),
         /// Section direction: right to left (`layout.sectionRtl`).
         rtl: bool,
+        /// Paper width and height in the measurement unit as shown (landscape: the wide side
+        /// first); `paper_was` as opened (`layout.size` runs only if it changed, #1433).
+        paper: (f32, f32),
+        paper_was: (f32, f32),
+        /// Custom size chosen in Paper size: shown even while the numbers match a named size.
+        paper_custom: bool,
+        /// Why OK didn't apply (the margins don't fit the paper).
+        message: String,
     },
     Link {
         url: String,
@@ -253,6 +267,12 @@ pub enum Dialog {
     },
     Bookmark {
         name: String,
+        /// Listed in document order (Word's Sort by Location) rather than by name.
+        by_location: bool,
+        /// Hidden bookmarks (`_Toc…`, `_Ref…`, made for tables of contents and cross-references) listed too.
+        hidden: bool,
+        /// A bookmark was deleted, so Cancel reads Close (as in Word).
+        deleted: bool,
     },
     WordCount {
         stats: Value,
@@ -352,10 +372,16 @@ pub enum Dialog {
     About {
         tab: u8,
     },
+    /// Confirm before deleting a recovery copy.
+    DiscardRecovery {
+        id: String,
+        name: String,
+    },
     /// "Do you want to save changes?" before a user's New, Open, Close, Envelopes, Labels or
     /// Finish & Merge replaces the document (see [`WordApp::run`]); `then` runs once it is
     /// answered (`ui.saveChanges`), and only while the document it asked about
-    /// (`Session::document_id`) is still the one open.
+    /// (`Session::document_id`) is still the one open. `message`: why the last Save failed, shown
+    /// in the prompt when it comes back after that failure (#1445); empty otherwise.
     SaveChanges {
         name: String,
         then: String,
@@ -363,6 +389,8 @@ pub enum Dialog {
         params: Value,
         #[serde(skip)]
         document: u64,
+        #[serde(default)]
+        message: String,
     },
     /// Mailings › Select Recipients / Edit Recipient List: a table of recipients to type or
     /// edit (field names on top), or a file to load instead (#240).
@@ -370,6 +398,8 @@ pub enum Dialog {
         fields: Vec<String>,
         rows: Vec<Vec<String>>,
         message: String,
+        /// Filter and Sort (#778): applied with `mailings.filterRecipients` on OK.
+        filter: RecipientFilter,
     },
     /// Mailings › Select Recipients › Use an Existing List… picked a workbook with several sheets
     /// (#334): which sheet holds the recipients, and whether its first row names the fields.
@@ -649,6 +679,67 @@ pub fn recipient_table(fields: &[String], rows: &[Vec<String>]) -> Result<Value,
     Ok(json!({"fields": fields, "rows": rows}))
 }
 
+/// The Recipient List dialog's Filter and Sort section (#778).
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct RecipientFilter {
+    /// Whether the section is shown.
+    pub open: bool,
+    pub rules: Vec<FilterRow>,
+    /// Sort by, then by, then by: a field (empty: none) and descending.
+    pub sort: [(String, bool); 3],
+}
+
+/// One filter condition row: `field op value`, joined to the row above with And or Or.
+#[derive(Clone, Debug, Serialize)]
+pub struct FilterRow {
+    pub field: String,
+    #[serde(serialize_with = "op_id")]
+    pub op: FilterOp,
+    pub value: String,
+    pub or: bool,
+}
+
+fn op_id<S: serde::Serializer>(op: &FilterOp, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(op.id())
+}
+
+impl RecipientFilter {
+    /// The session's current filter and sort.
+    pub fn from_session(m: &wordcraft_engine::cmd::mailings::MergeState) -> Self {
+        let mut sort: [(String, bool); 3] = Default::default();
+        for (slot, k) in sort.iter_mut().zip(&m.sort) {
+            *slot = (k.field.clone(), k.descending);
+        }
+        let rules: Vec<FilterRow> =
+            m.filter.iter().map(|r| FilterRow { field: r.field.clone(), op: r.op, value: r.value.clone(), or: r.or }).collect();
+        RecipientFilter { open: !rules.is_empty() || !m.sort.is_empty(), rules, sort }
+    }
+
+    fn engine(&self) -> (Vec<FilterRule>, Vec<SortKey>) {
+        let rules = self
+            .rules
+            .iter()
+            .filter(|r| !r.field.is_empty())
+            .map(|r| FilterRule { field: r.field.clone(), op: r.op, value: r.value.clone(), or: r.or })
+            .collect();
+        let sort = self.sort.iter().filter(|(f, _)| !f.is_empty()).map(|(f, d)| SortKey { field: f.clone(), descending: *d }).collect();
+        (rules, sort)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.rules.iter().all(|r| r.field.is_empty()) && self.sort.iter().all(|(f, _)| f.is_empty())
+    }
+
+    /// `mailings.filterRecipients` params.
+    pub fn params(&self) -> Value {
+        let (rules, sort) = self.engine();
+        json!({
+            "rules": rules.iter().map(|r| json!({"field": r.field, "op": r.op.id(), "value": r.value, "join": if r.or { "or" } else { "and" }})).collect::<Vec<_>>(),
+            "sort": sort.iter().map(|k| json!({"field": k.field, "descending": k.descending})).collect::<Vec<_>>(),
+        })
+    }
+}
+
 /// One table style region in the Table Style dialog: colours are hex, empty for none.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -868,6 +959,7 @@ pub(crate) fn color_field(ui: &mut Ui, theme: &[wordcraft_doc::Rgb], value: &mut
 impl Dialog {
     pub fn name(&self) -> &'static str {
         match self {
+            Dialog::RenameDocument { .. } => "renameDocument",
             Dialog::Font { .. } => "font",
             Dialog::Paragraph { .. } => "paragraph",
             Dialog::Tabs { .. } => "tabs",
@@ -895,6 +987,7 @@ impl Dialog {
             Dialog::PasteSpecial { .. } => "pasteSpecial",
             Dialog::About { .. } => "about",
             Dialog::SaveChanges { .. } => "saveChanges",
+            Dialog::DiscardRecovery { .. } => "discardRecovery",
             Dialog::RecipientList { .. } => "recipientList",
             Dialog::SelectTable { .. } => "selectTable",
             Dialog::InsertMergeField { .. } => "insertMergeField",
@@ -1071,7 +1164,12 @@ impl Dialog {
                 };
                 let size = app.session.doc.styles.resolve_char(Some("Normal"), &Default::default()).size;
                 let grid = (kind, sp.grid_lines_per_page().min(1000), sp.grid_chars_per_line(size).min(1000));
+                let paper = (sp.page_w / crate::options::unit().pt_per_unit(), sp.page_h / crate::options::unit().pt_per_unit());
                 Dialog::PageSetup {
+                    paper,
+                    paper_was: paper,
+                    paper_custom: false,
+                    message: String::new(),
                     top: sp.margin_top / crate::options::unit().pt_per_unit(),
                     bottom: sp.margin_bottom / crate::options::unit().pt_per_unit(),
                     left: sp.margin_left / crate::options::unit().pt_per_unit(),
@@ -1083,7 +1181,7 @@ impl Dialog {
                 }
             }
             "link" => Dialog::Link { url: "https://".into(), text: app.session.selected_text() },
-            "bookmark" => Dialog::Bookmark { name: String::new() },
+            "bookmark" => Dialog::Bookmark { name: bookmark_at_caret(&app.session), by_location: false, hidden: false, deleted: false },
             "wordCount" => Dialog::WordCount { stats: app.session.run("review.wordCount", &json!({})).unwrap_or_default() },
             "zoom" => Dialog::Zoom { percent: (app.session.view.zoom * 100.0).round() },
             "watermark" => Dialog::Watermark { text: "CONFIDENTIAL".into(), diagonal: true },
@@ -1133,6 +1231,7 @@ impl Dialog {
                 }
             }
             "pasteSpecial" => Dialog::paste_special(app, &json!({})),
+            "renameDocument" => Dialog::RenameDocument { name: app.title_stem(), message: String::new(), focus: true },
             "about" => Dialog::About { tab: 0 },
             "contributors" => Dialog::About { tab: 1 },
             "models" => Dialog::About { tab: 2 },
@@ -1140,11 +1239,17 @@ impl Dialog {
             "recipientList" | "newRecipientList" => {
                 let m = &app.session.merge;
                 if name == "recipientList" && !m.headers.is_empty() {
-                    Dialog::RecipientList { fields: m.headers.clone(), rows: m.rows.clone(), message: String::new() }
+                    // Every record (not only the filtered ones), with the filter to edit.
+                    Dialog::RecipientList {
+                        fields: m.headers.clone(),
+                        rows: m.source.clone(),
+                        message: String::new(),
+                        filter: RecipientFilter::from_session(m),
+                    }
                 } else {
                     let fields: Vec<String> = NEW_LIST_FIELDS.iter().map(|f| f.to_string()).collect();
                     let rows = vec![vec![String::new(); fields.len()]];
-                    Dialog::RecipientList { fields, rows, message: String::new() }
+                    Dialog::RecipientList { fields, rows, message: String::new(), filter: RecipientFilter::default() }
                 }
             }
             "insertMergeField" => {
@@ -1319,6 +1424,7 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context) {
     let mut open = true;
     let mut close = false;
     let title = match &d {
+        Dialog::RenameDocument { .. } => "Rename Document",
         Dialog::Font { .. } => "Font",
         Dialog::Paragraph { .. } => "Paragraph",
         Dialog::Tabs { .. } => "Tabs",
@@ -1344,6 +1450,7 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context) {
         Dialog::PasteSpecial { .. } => "Paste Special",
         Dialog::About { .. } => "About WordCraft",
         Dialog::SaveChanges { .. } => "WordCraft",
+        Dialog::DiscardRecovery { .. } => "Discard recovery copy",
         Dialog::RecipientList { .. } => "Recipient List",
         Dialog::SelectTable { .. } => "Select Table",
         Dialog::InsertMergeField { .. } => "Insert Merge Field",
@@ -1382,6 +1489,126 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context) {
     } else {
         app.canvas.want_focus = true;
     }
+}
+
+/// Labels of Page Setup's paper size (#1433), in one place in case Word's wording differs.
+pub(crate) const PAPER_LABELS: PaperLabels =
+    PaperLabels { group: "Paper", size: "Paper size:", custom: "Custom size", width: "Width:", height: "Height:", more: "More Paper Sizes…" };
+
+pub(crate) struct PaperLabels {
+    pub group: &'static str,
+    pub size: &'static str,
+    pub custom: &'static str,
+    pub width: &'static str,
+    pub height: &'static str,
+    /// The Size menu's last item, opening Page Setup.
+    pub more: &'static str,
+}
+
+/// The named paper size `paper` (in the measurement unit, either orientation) is, or None for a
+/// custom size.
+pub(crate) fn paper_entry(paper: (f32, f32)) -> Option<&'static str> {
+    let ppu = crate::options::unit().pt_per_unit();
+    wordcraft_geom::paper_name(paper.0 * ppu, paper.1 * ppu)
+}
+
+/// The commands Page Setup's OK runs for the paper, orientation and margins (#1433), all in the
+/// measurement unit as the dialog shows them. Refuses when the margins don't fit the paper.
+/// Otherwise it orders them so that none is refused on the way: the size first
+/// when the section's margins fit it, else the margins first, else margins of 0 in between.
+/// `layout.size` keeps the section's orientation; `layout.orientation` then turns the page and
+/// its margins to what the dialog shows. A size equal to the opened one (either way round,
+/// within 0.01 pt) doesn't run `layout.size`.
+fn page_layout_commands(
+    app: &WordApp,
+    (paper, was): ((f32, f32), (f32, f32)),
+    landscape: bool,
+    (top, bottom, left, right): (f32, f32, f32, f32),
+) -> Result<Vec<(&'static str, Value)>, &'static str> {
+    use wordcraft_engine::cmd::page::{MARGINS_DONT_FIT, margins_fit, sect};
+    let ppu = crate::options::unit().pt_per_unit();
+    let (paper, was) = ((paper.0 * ppu, paper.1 * ppu), (was.0 * ppu, was.1 * ppu));
+    let m = (top * ppu, bottom * ppu, left * ppu, right * ppu);
+    let cur = sect(&app.session);
+    if !margins_fit(paper, m, cur.gutter) {
+        return Err(MARGINS_DONT_FIT);
+    }
+    let turned = |on: bool, (a, b): (f32, f32)| if on { (a.max(b), a.min(b)) } else { (a.min(b), a.max(b)) };
+    let ((w0, h0), (w1, h1)) = (turned(false, paper), turned(false, was));
+    let new_size = (w0 - w1).abs() >= 0.01 || (h0 - h1).abs() >= 0.01;
+    let size = ("layout.size", json!({"width": paper.0, "height": paper.1}));
+    let orientation = ("layout.orientation", json!({"value": if landscape { "landscape" } else { "portrait" }}));
+    let margins = ("layout.margins", json!({"top": m.0, "bottom": m.1, "left": m.2, "right": m.3}));
+    let old_margins = (cur.margin_top, cur.margin_bottom, cur.margin_left, cur.margin_right);
+    Ok(if !new_size || margins_fit(turned(cur.landscape, paper), old_margins, cur.gutter) {
+        let mut v = if new_size { vec![size] } else { Vec::new() };
+        v.extend([orientation, margins]);
+        v
+    } else if margins_fit(turned(landscape, (cur.page_w, cur.page_h)), m, cur.gutter) {
+        vec![orientation, margins, size]
+    } else {
+        vec![orientation, ("layout.margins", json!({"top": 0.0, "bottom": 0.0, "left": 0.0, "right": 0.0})), size, margins]
+    })
+}
+
+/// Run a dialog's commands as one undo step. If one fails, put the document and the undo stack
+/// back as they were (nothing applied) and return its error.
+fn run_as_one_step(app: &mut WordApp, commands: Vec<(&str, Value)>) -> Result<(), String> {
+    let snapshot = app.session.edit_snapshot();
+    for (i, (id, params)) in commands.into_iter().enumerate() {
+        if i > 0 {
+            app.session.join_next_undo();
+        }
+        if let Err(e) = app.run(id, params) {
+            app.session.restore(snapshot);
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// Page Setup's Paper group (#1433): a Paper size list (the named sizes and Custom size) and
+/// the width and height. The fields follow the orientation (the wide side is the width in
+/// landscape), and a typed size that is wider than tall turns the orientation to landscape.
+fn page_paper_group(ui: &mut Ui, paper: &mut (f32, f32), landscape: &mut bool, custom: &mut bool) {
+    if (*landscape && paper.0 < paper.1) || (!*landscape && paper.0 > paper.1) {
+        *paper = (paper.1, paper.0);
+    }
+    let unit = crate::options::unit();
+    let ppu = unit.pt_per_unit();
+    let l = &PAPER_LABELS;
+    ui.label(egui::RichText::new(tl!(l.group)).font(semibold(12.5)));
+    ui.horizontal(|ui| {
+        let label = ui.label(tl!(l.size));
+        let entry = paper_entry(*paper).filter(|_| !*custom);
+        let shown = tl!(entry.unwrap_or(l.custom));
+        let combo = egui::ComboBox::from_id_salt("ps_paper_size").width(180.0).height(400.0).selected_text(shown).show_ui(ui, |ui| {
+            for (n, w, h) in wordcraft_geom::PAPER_SIZES {
+                if ui.selectable_label(entry == Some(*n), tl!(n)).clicked() {
+                    let (w, h) = (w / ppu, h / ppu);
+                    *paper = if *landscape { (w.max(h), w.min(h)) } else { (w.min(h), w.max(h)) };
+                    *custom = false;
+                }
+            }
+            // Custom size keeps the numbers to edit, and stays chosen while they match a name.
+            if ui.selectable_label(entry.is_none(), tl!(l.custom)).clicked() {
+                *custom = true;
+            }
+        });
+        combo.response.labelled_by(label.id);
+    });
+    egui::Grid::new("ps_paper").num_columns(4).show(ui, |ui| {
+        use wordcraft_engine::cmd::page::{MAX_PAGE_SIDE, MIN_PAGE_SIDE};
+        let range = MIN_PAGE_SIDE / ppu..=MAX_PAGE_SIDE / ppu;
+        ui.label(tl!(l.width));
+        let w = ui.add(egui::DragValue::new(&mut paper.0).speed(3.6 / ppu).range(range.clone()).measure(unit).max_decimals(2));
+        ui.label(tl!(l.height));
+        let h = ui.add(egui::DragValue::new(&mut paper.1).speed(3.6 / ppu).range(range).measure(unit).max_decimals(2));
+        if (w.changed() || h.changed()) && paper.0 != paper.1 {
+            *landscape = paper.0 > paper.1;
+        }
+        ui.end_row();
+    });
 }
 
 pub(crate) fn buttons(ui: &mut Ui, ok: &str) -> (bool, bool) {
@@ -1471,6 +1698,32 @@ fn apply_font(app: &mut WordApp, d: &Dialog) {
 /// Returns true to close.
 fn body(app: &mut WordApp, ui: &mut Ui, d: &mut Dialog) -> bool {
     match d {
+        Dialog::RenameDocument { name, message, focus } => {
+            ui.label(tl!("Document name"));
+            let r = ui.add(egui::TextEdit::singleline(name).desired_width(320.0).char_limit(200));
+            if *focus {
+                r.request_focus();
+                *focus = false;
+            }
+            if !message.is_empty() {
+                ui.colored_label(ui.visuals().error_fg_color, message.as_str());
+            }
+            let (ok, cancel) = buttons(ui, tl!("Rename"));
+            if cancel {
+                return true;
+            }
+            if ok && name.trim() == app.title_stem() {
+                return true;
+            }
+            if ok {
+                match app.run("file.rename", json!({"name": name})) {
+                    Ok(_) => return true,
+                    Err(e) => *message = e,
+                }
+            }
+            false
+        }
+
         Dialog::Font { font, font_ea, asian, size, bold, italic, underline, strike, sup, sub, small_caps, caps, hidden, color, spacing, .. } => {
             // Build the sample text format for the preview pane below.
             let preview_size = size.trim().parse::<f32>().unwrap_or(12.0).clamp(6.0, 72.0);
@@ -1865,7 +2118,7 @@ fn body(app: &mut WordApp, ui: &mut Ui, d: &mut Dialog) -> bool {
             }
             ok || cancel
         }
-        Dialog::PageSetup { top, bottom, left, right, landscape, rtl, grid, grid_was } => {
+        Dialog::PageSetup { top, bottom, left, right, landscape, rtl, grid, grid_was, paper, paper_was, paper_custom, message } => {
             ui.label(egui::RichText::new(tl!("Margins")).font(semibold(12.5)));
             egui::Grid::new("ps").num_columns(4).show(ui, |ui| {
                 ui.label(tl!("Top:"));
@@ -1886,6 +2139,7 @@ fn body(app: &mut WordApp, ui: &mut Ui, d: &mut Dialog) -> bool {
                 ui.radio_value(landscape, false, tl!("Portrait"));
                 ui.radio_value(landscape, true, tl!("Landscape"));
             });
+            page_paper_group(ui, paper, landscape, paper_custom);
             ui.label(egui::RichText::new(tl!("Document Grid")).font(semibold(12.5)));
             ui.horizontal_wrapped(|ui| {
                 ui.radio_value(&mut grid.0, 0, tl!("No grid"));
@@ -1905,24 +2159,34 @@ fn body(app: &mut WordApp, ui: &mut Ui, d: &mut Dialog) -> bool {
                 ui.radio_value(rtl, false, tl!("Left-to-right"));
                 ui.radio_value(rtl, true, tl!("Right-to-left"));
             });
-            let (ok, cancel) = buttons(ui, tl!("OK"));
+            if !message.is_empty() {
+                ui.label(egui::RichText::new(message.as_str()).small().color(ui.visuals().error_fg_color));
+            }
+            let (mut ok, cancel) = buttons(ui, tl!("OK"));
             if ok {
-                let _ = app.run("layout.orientation", json!({"value": if *landscape { "landscape" } else { "portrait" }}));
-                let _ =
-                    app.run("layout.margins", json!({"top": *top * crate::options::unit().pt_per_unit(), "bottom": *bottom * crate::options::unit().pt_per_unit(), "left": *left * crate::options::unit().pt_per_unit(), "right": *right * crate::options::unit().pt_per_unit()}));
-                if grid != grid_was {
-                    let kind = ["none", "lines", "linesAndChars", "snapToChars"].get(grid.0 as usize).copied().unwrap_or("none");
-                    let mut v = json!({"type": kind});
-                    if grid.1 != grid_was.1 {
-                        v["linesPerPage"] = json!(grid.1);
-                    }
-                    if grid.2 != grid_was.2 {
-                        v["charsPerLine"] = json!(grid.2);
-                    }
-                    let _ = app.run("layout.documentGrid", v);
-                }
-                if *rtl != wordcraft_engine::cmd::page::sect(&app.session).rtl {
-                    let _ = app.run("layout.sectionRtl", json!({"value": *rtl}));
+                // Everything OK changes is one undo step; a refused command applies nothing.
+                let result = page_layout_commands(app, (*paper, *paper_was), *landscape, (*top, *bottom, *left, *right))
+                    .map_err(|e| tl!(e).to_string())
+                    .and_then(|mut commands| {
+                        if grid != grid_was {
+                            let kind = ["none", "lines", "linesAndChars", "snapToChars"].get(grid.0 as usize).copied().unwrap_or("none");
+                            let mut v = json!({"type": kind});
+                            if grid.1 != grid_was.1 {
+                                v["linesPerPage"] = json!(grid.1);
+                            }
+                            if grid.2 != grid_was.2 {
+                                v["charsPerLine"] = json!(grid.2);
+                            }
+                            commands.push(("layout.documentGrid", v));
+                        }
+                        if *rtl != wordcraft_engine::cmd::page::sect(&app.session).rtl {
+                            commands.push(("layout.sectionRtl", json!({"value": *rtl})));
+                        }
+                        run_as_one_step(app, commands)
+                    });
+                if let Err(e) = result {
+                    *message = e;
+                    ok = false;
                 }
             }
             ok || cancel
@@ -1942,21 +2206,7 @@ fn body(app: &mut WordApp, ui: &mut Ui, d: &mut Dialog) -> bool {
             }
             ok || cancel
         }
-        Dialog::Bookmark { name } => {
-            ui.label(tl!("Bookmark name:"));
-            ui.text_edit_singleline(name);
-            let marks = app.session.doc.bookmarks();
-            for (n, _) in &marks {
-                if ui.selectable_label(false, n).clicked() {
-                    let _ = app.run("edit.goto", json!({"bookmark": n}));
-                }
-            }
-            let (ok, cancel) = buttons(ui, tl!("Add"));
-            if ok {
-                let _ = app.run("insert.bookmark", json!({"name": name}));
-            }
-            ok || cancel
-        }
+        Dialog::Bookmark { name, by_location, hidden, deleted } => bookmark(app, ui, name, by_location, hidden, deleted),
         Dialog::WordCount { stats } => {
             egui::Grid::new("wc").num_columns(2).spacing(vec2(30.0, 6.0)).show(ui, |ui| {
                 for (l, k) in [
@@ -2101,7 +2351,16 @@ fn body(app: &mut WordApp, ui: &mut Ui, d: &mut Dialog) -> bool {
                 ui.text_edit_singleline(name);
                 ui.end_row();
                 ui.label(tl!("Font:"));
-                ui.text_edit_singleline(font);
+                let shown = app.previews.font_shown(font);
+                let fams = app.previews.families();
+                let prev = app.previews.font_preview_fn();
+                if let Some(f) = crate::widgets::font_combo(ui, "ms_font", 220.0, &shown, &fams, Some(&*prev)) {
+                    if f == crate::widgets::ADD_FONT {
+                        let _ = app.run("font.add", json!({}));
+                    } else {
+                        *font = app.previews.font_stored(&f);
+                    }
+                }
                 ui.end_row();
                 ui.label(tl!("Size:"));
                 ui.add(egui::DragValue::new(size).range(1.0..=1638.0).speed(0.5));
@@ -2345,9 +2604,40 @@ fn body(app: &mut WordApp, ui: &mut Ui, d: &mut Dialog) -> bool {
             let (ok, cancel) = buttons(ui, tl!("Close"));
             ok || cancel
         }
-        Dialog::SaveChanges { name, .. } => {
+        Dialog::DiscardRecovery { name, .. } => {
+            ui.label(crate::i18n::fmt(tl!("Discard the recovery copy of {name}?"), &[("name", name)]));
+            ui.label(tl!("This cannot be undone. Your original file stays unchanged."));
+            let answer = ui
+                .horizontal(|ui| {
+                    let cancel = ui.button(tl!("Cancel"));
+                    let discard = ui.button(tl!("Discard"));
+                    if cancel.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        Some("cancel")
+                    } else if discard.clicked() {
+                        Some("discard")
+                    } else {
+                        None
+                    }
+                })
+                .inner;
+            if let Some(answer) = answer {
+                app.dialog = Some(d.clone());
+                let result = app.run("ui.recoveryDiscard", json!({"answer": answer}));
+                if let Err(e) = &result {
+                    app.status(e.clone());
+                }
+                return result.is_ok();
+            }
+            false
+        }
+        Dialog::SaveChanges { name, message, .. } => {
             ui.label(egui::RichText::new(crate::i18n::fmt(tl!("Do you want to save changes to {name}?"), &[("name", name)])).font(semibold(15.0)));
             ui.label(tl!("Your changes will be lost if you don't save them."));
+            // Why the last Save failed (#1445): the prompt came back so the user can't miss it.
+            if !message.is_empty() {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(message.as_str()).color(ui.visuals().error_fg_color));
+            }
             ui.add_space(8.0);
             let buttons = ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2384,7 +2674,7 @@ fn body(app: &mut WordApp, ui: &mut Ui, d: &mut Dialog) -> bool {
             let _ = app.run("ui.saveChanges", json!({"answer": answer}));
             true
         }
-        Dialog::RecipientList { fields, rows, message } => recipient_list(app, ui, fields, rows, message),
+        Dialog::RecipientList { fields, rows, message, filter } => recipient_list(app, ui, fields, rows, message, filter),
         Dialog::InsertMergeField { fields, field } => {
             if fields.is_empty() {
                 ui.label(egui::RichText::new(tl!("Select recipients first to choose from their fields.")).small().weak());
@@ -2656,13 +2946,32 @@ fn body(app: &mut WordApp, ui: &mut Ui, d: &mut Dialog) -> bool {
 }
 
 /// The Recipient List dialog's body: a file button, the editable table, OK/Cancel. True to close.
-fn recipient_list(app: &mut WordApp, ui: &mut Ui, fields: &mut Vec<String>, rows: &mut Vec<Vec<String>>, message: &mut String) -> bool {
+fn recipient_list(
+    app: &mut WordApp,
+    ui: &mut Ui,
+    fields: &mut Vec<String>,
+    rows: &mut Vec<Vec<String>>,
+    message: &mut String,
+    filter: &mut RecipientFilter,
+) -> bool {
     const CELL_W: f32 = 120.0;
     const X_W: f32 = 18.0;
     const ROW_H: f32 = 24.0;
+    const NUM_W: f32 = 34.0;
+    // Each record's place in the merge (None: filtered out), when there is a filter or sort.
+    let order: Option<Vec<Option<usize>>> = (!filter.is_empty()).then(|| {
+        let (rules, sort) = filter.engine();
+        let mut order = vec![None; rows.len()];
+        for (k, i) in wordcraft_engine::cmd::mailings::select_records(fields, rows, &rules, &sort).into_iter().enumerate() {
+            if let Some(slot) = order.get_mut(i) {
+                *slot = Some(k + 1);
+            }
+        }
+        order
+    });
     // Wide enough for every field (up to a limit; more scroll sideways).
     let gap = ui.spacing().item_spacing.x;
-    let table_w = fields.len() as f32 * (CELL_W + X_W + 2.0 * gap) + X_W + 2.0 * gap;
+    let table_w = NUM_W + gap + fields.len() as f32 * (CELL_W + X_W + 2.0 * gap) + X_W + 2.0 * gap;
     ui.set_min_width(table_w.clamp(340.0, 720.0));
     ui.label(tl!("Type the recipients, or load them from a file."));
     if ui.button(tl!("Use an Existing List…")).clicked() {
@@ -2678,6 +2987,7 @@ fn recipient_list(app: &mut WordApp, ui: &mut Ui, fields: &mut Vec<String>, rows
     egui::ScrollArea::horizontal().id_salt("recipients_h").max_width(720.0).show(ui, |ui| {
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
+                ui.allocate_exact_size(vec2(NUM_W, ROW_H - 4.0), Sense::hover());
                 for (i, f) in fields.iter_mut().enumerate() {
                     ui.add_sized([CELL_W, ROW_H - 4.0], egui::TextEdit::singleline(f).font(egui::TextStyle::Button).hint_text(tl!("Field name")));
                     let x = ui.add_enabled(can_remove, egui::Button::new("×").small().min_size(vec2(X_W, X_W))).on_hover_text(tl!("Remove field"));
@@ -2692,6 +3002,15 @@ fn recipient_list(app: &mut WordApp, ui: &mut Ui, fields: &mut Vec<String>, rows
                 for r in range {
                     let Some(row) = rows.get_mut(r) else { continue };
                     ui.horizontal(|ui| {
+                        // The record's number in the merge, a dash when the filter leaves it out.
+                        let (num, kept) = match order.as_ref().map(|o| o.get(r).copied().flatten()) {
+                            None => ((r + 1).to_string(), true),
+                            Some(Some(k)) => (k.to_string(), true),
+                            Some(None) => ("–".to_string(), false),
+                        };
+                        let num = egui::RichText::new(num).weak();
+                        let (rect, _) = ui.allocate_exact_size(vec2(NUM_W, ROW_H - 4.0), Sense::hover());
+                        ui.put(rect, egui::Label::new(if kept { num } else { num.strikethrough() }));
                         for c in row.iter_mut() {
                             ui.add_sized([CELL_W, ROW_H - 4.0], egui::TextEdit::singleline(c));
                             // Under the field's remove button.
@@ -2727,6 +3046,22 @@ fn recipient_list(app: &mut WordApp, ui: &mut Ui, fields: &mut Vec<String>, rows
             }
         }
     });
+    ui.add_space(4.0);
+    let toggle = egui::Button::new(tl!("Filter and Sort")).selected(filter.open);
+    if ui.add(toggle).clicked() {
+        filter.open = !filter.open;
+    }
+    if filter.open {
+        recipient_filter(ui, fields, filter);
+    }
+    if let Some(order) = &order {
+        let count = order.iter().flatten().count().to_string();
+        let total = rows.len().to_string();
+        ui.label(
+            egui::RichText::new(crate::i18n::fmt(tl!("{count} of {total} recipients will be merged."), &[("count", &count), ("total", &total)]))
+                .weak(),
+        );
+    }
     if !message.is_empty() {
         ui.label(egui::RichText::new(message.as_str()).color(Tokens::get(ui.ctx()).red));
     }
@@ -2734,13 +3069,91 @@ fn recipient_list(app: &mut WordApp, ui: &mut Ui, fields: &mut Vec<String>, rows
     if !ok {
         return cancel;
     }
-    match recipient_table(fields, rows).map_err(|e| tl!(e).to_string()).and_then(|params| app.load_recipients(params)) {
+    let r = recipient_table(fields, rows).map_err(|e| tl!(e).to_string()).and_then(|params| app.load_recipients(params));
+    // A new list starts unfiltered; the dialog's filter and sort apply to it.
+    let r = r.and_then(|_| if filter.is_empty() { Ok(Value::Null) } else { app.run("mailings.filterRecipients", filter.params()) });
+    match r {
         Ok(_) => true,
         Err(e) => {
             *message = e;
             false
         }
     }
+}
+
+/// Filter and Sort: condition rows (And/Or, field, comparison, value) and three sort keys.
+fn recipient_filter(ui: &mut Ui, fields: &[String], filter: &mut RecipientFilter) {
+    let names: Vec<String> = fields.iter().map(|f| f.trim().to_string()).filter(|f| !f.is_empty()).collect();
+    let field_combo = |ui: &mut Ui, id: (&str, usize), value: &mut String, none: bool| {
+        let shown = if value.is_empty() { tl!("(none)").to_string() } else { value.clone() };
+        egui::ComboBox::from_id_salt(id).width(130.0).selected_text(shown).show_ui(ui, |ui| {
+            if none {
+                ui.selectable_value(value, String::new(), tl!("(none)"));
+            }
+            for n in &names {
+                ui.selectable_value(value, n.clone(), n.as_str());
+            }
+        });
+    };
+    let mut remove = None;
+    egui::Grid::new("recipient_filter").num_columns(5).spacing(vec2(6.0, 4.0)).show(ui, |ui| {
+        ui.label("");
+        ui.label(egui::RichText::new(tl!("Field")).weak());
+        ui.label(egui::RichText::new(tl!("Comparison")).weak());
+        ui.label(egui::RichText::new(tl!("Compare to")).weak());
+        ui.end_row();
+        for (i, r) in filter.rules.iter_mut().enumerate() {
+            if i == 0 {
+                ui.label("");
+            } else {
+                egui::ComboBox::from_id_salt(("rf_join", i)).width(60.0).selected_text(tl!(if r.or { "Or" } else { "And" })).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut r.or, false, tl!("And"));
+                    ui.selectable_value(&mut r.or, true, tl!("Or"));
+                });
+            }
+            field_combo(ui, ("rf_field", i), &mut r.field, false);
+            egui::ComboBox::from_id_salt(("rf_op", i)).width(150.0).selected_text(tl!(r.op.label())).show_ui(ui, |ui| {
+                for op in FilterOp::ALL {
+                    ui.selectable_value(&mut r.op, op, tl!(op.label()));
+                }
+            });
+            ui.add_enabled(r.op.has_value(), egui::TextEdit::singleline(&mut r.value).desired_width(130.0));
+            if ui.add(egui::Button::new("×").small()).on_hover_text(tl!("Remove condition")).clicked() {
+                remove = Some(i);
+            }
+            ui.end_row();
+        }
+    });
+    if let Some(i) = remove.filter(|i| *i < filter.rules.len()) {
+        filter.rules.remove(i);
+    }
+    ui.horizontal(|ui| {
+        if ui.button(tl!("Add Condition")).clicked() && filter.rules.len() < 64 {
+            let field = names.first().cloned().unwrap_or_default();
+            filter.rules.push(FilterRow { field, op: FilterOp::Equal, value: String::new(), or: false });
+        }
+        if ui.button(tl!("Clear All")).clicked() {
+            filter.rules.clear();
+            filter.sort = Default::default();
+        }
+    });
+    ui.add_space(4.0);
+    egui::Grid::new("recipient_sort").num_columns(3).spacing(vec2(6.0, 4.0)).show(ui, |ui| {
+        for (i, (field, desc)) in filter.sort.iter_mut().enumerate() {
+            ui.label(tl!(if i == 0 { "Sort by" } else { "Then by" }));
+            field_combo(ui, ("rs_field", i), field, true);
+            ui.add_enabled_ui(!field.is_empty(), |ui| {
+                egui::ComboBox::from_id_salt(("rs_dir", i)).width(110.0).selected_text(tl!(if *desc { "Descending" } else { "Ascending" })).show_ui(
+                    ui,
+                    |ui| {
+                        ui.selectable_value(desc, false, tl!("Ascending"));
+                        ui.selectable_value(desc, true, tl!("Descending"));
+                    },
+                );
+            });
+            ui.end_row();
+        }
+    });
 }
 
 /// The Table Properties dialog's fields: Table, Row, Column and Cell sections.
@@ -2869,6 +3282,92 @@ fn apply_asian(app: &mut WordApp, asian: [bool; 6], was: [bool; 6]) {
     if !changed.is_empty() {
         let _ = app.run("para.asianTypography", Value::Object(changed));
     }
+}
+
+/// The innermost bookmark around the caret, which the Bookmark dialog opens on (as Word does);
+/// empty when the caret is in none.
+fn bookmark_at_caret(s: &wordcraft_engine::Session) -> String {
+    let at = &s.sel.focus;
+    s.doc
+        .bookmarks()
+        .into_iter()
+        .rev()
+        .find(|(name, start)| !name.starts_with('_') && start <= at && *at <= wordcraft_engine::cmd::insert::bookmark_span(&s.doc, name, start).1)
+        .map(|(name, _)| name)
+        .unwrap_or_default()
+}
+
+/// The bookmarks the Bookmark dialog lists: by name or in document order, the hidden ones
+/// (`_Toc…`, `_Ref…`) only when asked for.
+fn bookmark_names(doc: &wordcraft_doc::Document, by_location: bool, hidden: bool) -> Vec<String> {
+    let mut names: Vec<String> = doc.bookmarks().into_iter().map(|(n, _)| n).filter(|n| hidden || !n.starts_with('_')).collect();
+    if !by_location {
+        names.sort_by_key(|n| n.to_lowercase());
+    }
+    names
+}
+
+/// Insert › Bookmark, laid out as Word's (#1236): the name box over the list, Add / Delete / Go To
+/// beside them, Sort by and Hidden bookmarks below. Add (Enter) closes the dialog; Delete and Go
+/// To leave it open, and once a bookmark is deleted Cancel reads Close.
+fn bookmark(app: &mut WordApp, ui: &mut Ui, name: &mut String, by_location: &mut bool, hidden: &mut bool, deleted: &mut bool) -> bool {
+    let marks = bookmark_names(&app.session.doc, *by_location, *hidden);
+    let t = Tokens::get(ui.ctx());
+    let (mut add, mut delete, mut go_to) = (false, false, false);
+    ui.horizontal_top(|ui| {
+        ui.vertical(|ui| {
+            ui.label(tl!("Bookmark name:"));
+            ui.add(egui::TextEdit::singleline(name).desired_width(240.0));
+            egui::Frame::NONE.stroke(egui::Stroke::new(1.0, t.border)).inner_margin(4).show(ui, |ui| {
+                ui.set_width(232.0);
+                ui.set_height(150.0);
+                egui::ScrollArea::vertical().id_salt("bookmark_list").max_height(150.0).auto_shrink([false, false]).show(ui, |ui| {
+                    for n in &marks {
+                        if ui.selectable_label(*n == *name, n.as_str()).clicked() {
+                            *name = n.clone();
+                        }
+                    }
+                });
+            });
+        });
+        ui.vertical(|ui| {
+            ui.add_space(18.0);
+            let listed = marks.iter().any(|n| n == name.trim());
+            let w = vec2(90.0, 0.0);
+            add = ui.add_enabled(wordcraft_engine::cmd::insert::bookmark_name_ok(name.trim()), egui::Button::new(tl!("Add")).min_size(w)).clicked();
+            delete = ui.add_enabled(listed, egui::Button::new(tl!("Delete")).min_size(w)).clicked();
+            go_to = ui.add_enabled(listed, egui::Button::new(tl!("Go To")).min_size(w)).clicked();
+        });
+    });
+    ui.add_space(6.0);
+    ui.horizontal_top(|ui| {
+        ui.label(tl!("Sort by:"));
+        ui.vertical(|ui| {
+            ui.radio_value(by_location, false, tl!("Name"));
+            ui.radio_value(by_location, true, tl!("Location"));
+        });
+    });
+    ui.checkbox(hidden, tl!("Hidden bookmarks"));
+    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+    if add || (enter && wordcraft_engine::cmd::insert::bookmark_name_ok(name.trim())) {
+        let _ = app.run("insert.bookmark", json!({"name": name.trim()}));
+        return true;
+    }
+    if delete && app.run("insert.deleteBookmark", json!({"name": name.trim()})).is_ok() {
+        name.clear();
+        *deleted = true;
+    }
+    if go_to {
+        let _ = app.run("edit.goto", json!({"bookmark": name.trim()}));
+    }
+    ui.add_space(8.0);
+    let mut close = ui.input(|i| i.key_pressed(egui::Key::Escape));
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            close |= ui.button(if *deleted { tl!("Close") } else { tl!("Cancel") }).clicked();
+        });
+    });
+    close
 }
 
 /// Manage Styles' body. Reads the list from `styles.manage`'s data (never re-running the command,
@@ -3294,6 +3793,56 @@ mod tests {
         }
     }
 
+    /// Insert › Bookmark (#1236), as in Word: it opens on the bookmark around the caret, lists by
+    /// name, Go To selects a bookmark's text and Delete removes one — both leaving the dialog
+    /// open, Cancel then reading Close — and one undo brings the bookmark back.
+    #[test]
+    fn the_bookmark_dialog_goes_to_and_deletes_bookmarks() {
+        fn press(h: &mut egui_kittest::Harness<'_, WordApp>, label: &str) {
+            use egui_kittest::kittest::Queryable;
+            let dialog = h.ctx.memory(|m| m.area_rect(egui::Id::new(("dialog", "Bookmark")))).expect("the dialog is open");
+            h.query_all_by_label(label).find(|n| dialog.contains(n.rect().center())).expect(label).click();
+            for _ in 0..3 {
+                h.step();
+            }
+        }
+        let mut app = app_with("Alpha beta gamma");
+        for (word, name) in [("Alpha", "_Hidden"), ("beta", "Zulu"), ("gamma", "Yankee")] {
+            let _ = app.run("select.text", json!({"text": word}));
+            let _ = app.run("insert.bookmark", json!({"name": name}));
+        }
+        let doc = &app.session.doc;
+        assert_eq!(bookmark_names(doc, false, false), ["Yankee", "Zulu"], "by name, hidden ones left out");
+        assert_eq!(bookmark_names(doc, true, false), ["Zulu", "Yankee"], "by location");
+        assert_eq!(bookmark_names(doc, false, true), ["_Hidden", "Yankee", "Zulu"]);
+        let _ = app.run("select.text", json!({"text": "gamma"}));
+        app.dialog = Dialog::open("bookmark", &mut app);
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1440.0, 900.0)).build_ui_state(
+            |ui, app: &mut WordApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            app,
+        );
+        for _ in 0..4 {
+            h.step();
+        }
+        assert!(matches!(&h.state().dialog, Some(Dialog::Bookmark { name, .. }) if name == "Yankee"), "opens on the caret's bookmark");
+        press(&mut h, "Zulu");
+        press(&mut h, "Go To");
+        assert_eq!(h.state().session.selected_text(), "beta");
+        press(&mut h, "Delete");
+        let names: Vec<String> = h.state().session.doc.bookmarks().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, ["_Hidden", "Yankee"]);
+        assert!(matches!(&h.state().dialog, Some(Dialog::Bookmark { name, deleted: true, .. }) if name.is_empty()), "still open");
+        assert_eq!(h.state().session.selected_text(), "beta", "the text stays selected");
+        press(&mut h, "Close");
+        assert!(h.state().dialog.is_none());
+        let _ = h.state_mut().run("edit.undo", json!({}));
+        assert_eq!(h.state().session.doc.bookmarks().len(), 3, "one undo step");
+    }
+
     /// Find, Replace and Go To are one dialog with three tabs (#712).
     #[test]
     fn find_replace_and_go_to_are_one_dialog() {
@@ -3659,6 +4208,42 @@ mod tests {
         assert_eq!((c.small_caps, c.caps, c.size), (Some(false), Some(true), Some(14.0)));
     }
 
+    /// #1178: Modify Style's font box is the ribbon's font box, so typing part of a name picks the
+    /// installed family instead of storing the typed text.
+    #[test]
+    fn modify_style_font_box_finds_the_family() {
+        use egui_kittest::kittest::{By, Queryable};
+        let mut app = app_with("Example");
+        app.dialog = Dialog::modify_style(&app, "Normal");
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1440.0, 900.0)).build_ui_state(
+            move |ui, app: &mut WordApp| {
+                let ctx = ui.ctx().clone();
+                if fonts {
+                    show(app, &ctx);
+                } else {
+                    crate::theme::install_fonts_for(&ctx, false);
+                    fonts = true;
+                }
+            },
+            app,
+        );
+        h.run_steps(3);
+        h.get(By::new().role(egui::accesskit::Role::TextInput).value(wordcraft_doc::styles::BODY_FONT)).focus();
+        h.step();
+        let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        h.event(key(egui::Key::A, egui::Modifiers::COMMAND));
+        h.step();
+        h.event(egui::Event::Text("aptos disp".into()));
+        h.step();
+        // Enter both picks the highlighted family and presses OK, as in the Font dialog.
+        h.event(key(egui::Key::Enter, egui::Modifiers::NONE));
+        h.run_steps(2);
+        assert!(h.state().dialog.is_none(), "Enter pressed OK");
+        let rc = h.state().session.doc.styles.resolve_char(Some("Normal"), &wordcraft_doc::CharProps::default());
+        assert_eq!(rc.font, wordcraft_doc::styles::HEADING_FONT);
+    }
+
     /// A dialog was pinned by its anchor, so dragging its title bar did nothing (#732).
     #[test]
     fn dragging_a_dialog_title_bar_moves_it() {
@@ -3696,5 +4281,269 @@ mod tests {
         let after = h.ctx.memory(|m| m.area_rect(id)).expect("dialog is still open");
         assert!((after.min.x - (before.min.x - 200.0)).abs() <= 1.0, "moved left: {before:?} -> {after:?}");
         assert!((after.min.y - (before.min.y + 120.0)).abs() <= 1.0, "moved down: {before:?} -> {after:?}");
+    }
+
+    fn app_harness(app: WordApp) -> egui_kittest::Harness<'static, WordApp> {
+        egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+            |ui, app: &mut WordApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            app,
+        )
+    }
+
+    /// The Page Setup paper size as opened, in points, and the Paper size entry it shows.
+    fn opened_paper(app: &mut WordApp) -> ((f32, f32), Option<&'static str>) {
+        let Some(Dialog::PageSetup { paper, .. }) = Dialog::open("pageSetup", app) else { panic!("no page setup dialog") };
+        let ppu = crate::options::unit().pt_per_unit();
+        ((paper.0 * ppu, paper.1 * ppu), paper_entry(paper))
+    }
+
+    /// #1433: Page Setup's Paper size shows the named size the section has, in either
+    /// orientation, and Custom size (None) for anything else.
+    #[test]
+    fn page_setup_reads_the_paper_size() {
+        let mut app = app_with("Page");
+        let sect = |app: &WordApp| wordcraft_engine::cmd::page::sect(&app.session);
+        let ((w, h), entry) = opened_paper(&mut app);
+        assert!((w - sect(&app).page_w).abs() < 0.01 && (h - sect(&app).page_h).abs() < 0.01, "{w}×{h}");
+        assert_eq!(entry, wordcraft_geom::paper_name(w, h));
+        assert!(entry.is_some(), "a new document has a named size");
+        let _ = app.run("layout.size", json!({"name": "A4"}));
+        let _ = app.run("layout.orientation", json!({"value": "landscape"}));
+        let ((w, h), entry) = opened_paper(&mut app);
+        assert!(w > h, "landscape shows the wide side as the width: {w}×{h}");
+        assert_eq!(entry, Some("A4"));
+        let _ = app.run("layout.size", json!({"width": 300.0, "height": 500.0}));
+        assert_eq!(opened_paper(&mut app).1, None, "Custom size");
+    }
+
+    /// #1433: a custom width and height applied with OK set the section's size (before the
+    /// orientation, so a wide custom size ends up landscape); an unchanged size doesn't run
+    /// `layout.size`, and switching orientation alone only turns the page.
+    #[test]
+    fn page_setup_applies_a_custom_paper_size() {
+        use egui_kittest::kittest::Queryable;
+        let ppu = crate::options::unit().pt_per_unit();
+        let size_steps = |app: &WordApp| app.session.undo_labels().iter().filter(|l| l.as_str() == "Size").count();
+        let sect = |app: &WordApp| {
+            let s = wordcraft_engine::cmd::page::sect(&app.session);
+            (s.page_w.round(), s.page_h.round(), s.landscape)
+        };
+        // OK on an unchanged dialog leaves the size alone.
+        let mut h = app_harness(app_with("Page"));
+        let before = sect(h.state());
+        h.state_mut().run("ui.dialog", json!({"name": "pageSetup"})).unwrap();
+        h.run_steps(3);
+        h.get_by_label("OK").click();
+        h.run_steps(3);
+        assert!(h.state().dialog.is_none());
+        assert_eq!((sect(h.state()), size_steps(h.state())), (before, 0), "no layout.size for an unchanged size");
+
+        for ((w, ht), want) in [((400.0, 600.0), (400.0, 600.0, false)), ((800.0, 400.0), (800.0, 400.0, true))] {
+            h.state_mut().run("ui.dialog", json!({"name": "pageSetup"})).unwrap();
+            h.run_steps(2);
+            if let Some(Dialog::PageSetup { paper, landscape, .. }) = h.state_mut().dialog.as_mut() {
+                *paper = (w / ppu, ht / ppu);
+                *landscape = w > ht;
+            }
+            h.run_steps(2);
+            h.get_by_label("OK").click();
+            h.run_steps(3);
+            assert_eq!(sect(h.state()), want, "{w}×{ht}");
+        }
+        assert_eq!(size_steps(h.state()), 2);
+
+        // Portrait again with the same paper: the dialog swaps width and height, which is no new size.
+        h.state_mut().run("ui.dialog", json!({"name": "pageSetup"})).unwrap();
+        h.run_steps(2);
+        if let Some(Dialog::PageSetup { paper, landscape, .. }) = h.state_mut().dialog.as_mut() {
+            *paper = (paper.1, paper.0);
+            *landscape = false;
+        }
+        h.run_steps(2);
+        h.get_by_label("OK").click();
+        h.run_steps(3);
+        assert_eq!(sect(h.state()), (400.0, 800.0, false));
+        assert_eq!(size_steps(h.state()), 2, "turning the page isn't a new size");
+    }
+
+    /// #1433: the Paper group's own widgets: choosing A4 in Paper size fills Width and Height,
+    /// Landscape swaps them, OK gives an A4 landscape section; typing a width wider than the
+    /// height turns the orientation to Landscape and shows Custom size; choosing Custom size
+    /// keeps the numbers and stays chosen.
+    #[test]
+    fn page_setup_paper_widgets_work_together() {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::Queryable;
+        let ppu = crate::options::unit().pt_per_unit();
+        let mut h = app_harness(app_with("Page"));
+        h.state_mut().run("ui.dialog", json!({"name": "pageSetup"})).unwrap();
+        h.run_steps(3);
+        let state = |h: &egui_kittest::Harness<'_, WordApp>| match &h.state().dialog {
+            Some(Dialog::PageSetup { paper, landscape, .. }) => {
+                ((paper.0 * ppu * 100.0).round() / 100.0, (paper.1 * ppu * 100.0).round() / 100.0, *landscape)
+            }
+            _ => panic!("no page setup dialog"),
+        };
+        let combo = |h: &egui_kittest::Harness<'_, WordApp>| h.get_by_role_and_label(Role::ComboBox, "Paper size:").value();
+        assert_eq!(combo(&h).as_deref(), Some("Letter"));
+        h.get_by_role_and_label(Role::ComboBox, "Paper size:").click();
+        h.run_steps(3);
+        h.get_by_label("A4").click();
+        h.run_steps(3);
+        assert_eq!(state(&h), (595.28, 841.89, false), "A4 fills the fields");
+        assert_eq!(combo(&h).as_deref(), Some("A4"));
+        h.get_by_label("Landscape").click();
+        h.run_steps(3);
+        assert_eq!(state(&h), (841.89, 595.28, true), "Landscape swaps them");
+        assert_eq!(combo(&h).as_deref(), Some("A4"));
+        h.get_by_label("OK").click();
+        h.run_steps(3);
+        let sect = wordcraft_engine::cmd::page::sect(&h.state().session);
+        assert_eq!(((sect.page_w * 100.0).round() / 100.0, (sect.page_h * 100.0).round() / 100.0, sect.landscape), (841.89, 595.28, true));
+
+        // Portrait A4 again; a width wider than the height turns it to Landscape, Custom size.
+        h.state_mut().run("layout.orientation", json!({"value": "portrait"})).unwrap();
+        h.state_mut().run("ui.dialog", json!({"name": "pageSetup"})).unwrap();
+        h.run_steps(3);
+        h.get_by_value("8.27\"").focus();
+        h.run_steps(2);
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.event(egui::Event::Text("15".into()));
+        h.key_press(egui::Key::Tab);
+        h.run_steps(3);
+        assert_eq!(state(&h), (1080.0, 841.89, true), "wider than tall: Landscape");
+        assert_eq!(combo(&h).as_deref(), Some("Custom size"));
+
+        // Back to A4, then Custom size: the numbers stay and so does the choice.
+        h.get_by_role_and_label(Role::ComboBox, "Paper size:").click();
+        h.run_steps(3);
+        h.get_by_label("A4").click();
+        h.run_steps(3);
+        h.get_by_role_and_label(Role::ComboBox, "Paper size:").click();
+        h.run_steps(3);
+        h.get_by_label("Custom size").click();
+        h.run_steps(3);
+        assert_eq!(state(&h), (841.89, 595.28, true));
+        assert_eq!(combo(&h).as_deref(), Some("Custom size"));
+    }
+
+    /// #1433: Page Setup checks the new size and margins together: a page its margins don't fit
+    /// keeps the dialog open with a message and applies nothing; a smaller page with smaller
+    /// margins applies (margins first, so no step is refused on the way).
+    #[test]
+    fn page_setup_refuses_margins_that_dont_fit_and_applies_smaller_ones_first() {
+        use egui_kittest::kittest::Queryable;
+        let ppu = crate::options::unit().pt_per_unit();
+        let mut h = app_harness(app_with("Page"));
+        let before = wordcraft_engine::cmd::page::sect(&h.state().session);
+        let undo = h.state().session.undo_depth();
+        h.state_mut().run("ui.dialog", json!({"name": "pageSetup"})).unwrap();
+        h.run_steps(2);
+        if let Some(Dialog::PageSetup { paper, .. }) = h.state_mut().dialog.as_mut() {
+            *paper = (100.0 / ppu, 500.0 / ppu);
+        }
+        h.run_steps(2);
+        h.get_by_label("OK").click();
+        h.run_steps(3);
+        assert!(
+            matches!(&h.state().dialog, Some(Dialog::PageSetup { message, .. }) if message.contains("margins don't fit")),
+            "stays open with a message"
+        );
+        assert_eq!((wordcraft_engine::cmd::page::sect(&h.state().session), h.state().session.undo_depth()), (before, undo), "nothing applied");
+
+        if let Some(Dialog::PageSetup { top, bottom, left, right, .. }) = h.state_mut().dialog.as_mut() {
+            (*top, *bottom, *left, *right) = (18.0 / ppu, 18.0 / ppu, 18.0 / ppu, 18.0 / ppu);
+        }
+        h.run_steps(2);
+        h.get_by_label("OK").click();
+        h.run_steps(3);
+        assert!(h.state().dialog.is_none());
+        let s = wordcraft_engine::cmd::page::sect(&h.state().session);
+        assert_eq!((s.page_w.round(), s.page_h.round(), s.margin_left.round(), s.margin_top.round()), (100.0, 500.0, 18.0, 18.0));
+    }
+
+    /// Open Page Setup in `h`, set its paper and margins (points) and press OK.
+    fn page_setup_ok(h: &mut egui_kittest::Harness<'_, WordApp>, (w, ht): (f32, f32), (t, b, l, r): (f32, f32, f32, f32)) {
+        use egui_kittest::kittest::Queryable;
+        let ppu = crate::options::unit().pt_per_unit();
+        h.state_mut().run("ui.dialog", json!({"name": "pageSetup"})).unwrap();
+        h.run_steps(2);
+        if let Some(Dialog::PageSetup { paper, landscape, top, bottom, left, right, .. }) = h.state_mut().dialog.as_mut() {
+            *paper = (w / ppu, ht / ppu);
+            *landscape = w > ht;
+            (*top, *bottom, *left, *right) = (t / ppu, b / ppu, l / ppu, r / ppu);
+        }
+        h.run_steps(2);
+        h.get_by_label("OK").click();
+        h.run_steps(3);
+    }
+
+    /// #1433: one OK in Page Setup is one undo step, whichever order its commands run in (the
+    /// size first; the margins first; margins of 0 in between), and Undo restores the section.
+    #[test]
+    fn page_setup_ok_is_one_undo_step() {
+        let sect = |h: &egui_kittest::Harness<'_, WordApp>| wordcraft_engine::cmd::page::sect(&h.state().session);
+        // Size first, then orientation and margins.
+        let mut h = app_harness(app_with("Page"));
+        let (before, depth) = (sect(&h), h.state().session.undo_depth());
+        page_setup_ok(&mut h, (400.0, 600.0), (36.0, 36.0, 36.0, 36.0));
+        assert!(h.state().dialog.is_none());
+        assert_eq!((sect(&h).page_w, sect(&h).margin_left), (400.0, 36.0));
+        assert_eq!(h.state().session.undo_depth(), depth + 1, "one step");
+        h.state_mut().run("edit.undo", json!({})).unwrap();
+        assert_eq!(sect(&h), before, "one undo restores the section");
+
+        // Neither size first nor margins first fits on the way: margins of 0 in between.
+        h.state_mut().run("layout.margins", json!({"top": 72.0, "bottom": 72.0, "left": 250.0, "right": 250.0})).unwrap();
+        let (before, depth) = (sect(&h), h.state().session.undo_depth());
+        page_setup_ok(&mut h, (300.0, 900.0), (400.0, 400.0, 36.0, 36.0));
+        assert!(h.state().dialog.is_none());
+        let s = sect(&h);
+        assert_eq!((s.page_w, s.page_h, s.margin_top, s.margin_left), (300.0, 900.0, 400.0, 36.0));
+        assert_eq!(h.state().session.undo_depth(), depth + 1, "one step");
+        h.state_mut().run("edit.undo", json!({})).unwrap();
+        assert_eq!(sect(&h), before, "one undo restores the section");
+    }
+
+    /// #1433: a command the dialog runs that fails (here `layout.size`, refused by the second
+    /// selected section's margins) shows its error, keeps the dialog open and leaves the
+    /// document and the undo stack as they were.
+    #[test]
+    fn page_setup_shows_a_refused_command_and_applies_nothing() {
+        let mut app = app_with("one");
+        app.run("layout.break", json!({"kind": "nextPage"})).unwrap();
+        app.run("text.insert", json!({"text": "two"})).unwrap();
+        app.run("layout.margins", json!({"left": 150.0, "right": 150.0})).unwrap();
+        // Both sections selected, the first one's settings in the dialog.
+        app.run("select.all", json!({})).unwrap();
+        let sel = &mut app.session.sel;
+        std::mem::swap(&mut sel.anchor, &mut sel.focus);
+        let doc = app.session.doc.sections().iter().map(|(_, x)| (*x).clone()).collect::<Vec<_>>();
+        let depth = app.session.undo_depth();
+        let mut h = app_harness(app);
+        page_setup_ok(&mut h, (300.0, 500.0), (72.0, 72.0, 72.0, 72.0));
+        assert!(
+            matches!(&h.state().dialog, Some(Dialog::PageSetup { message, .. }) if message.contains("margins don't fit")),
+            "stays open with the error"
+        );
+        let after = h.state().session.doc.sections().iter().map(|(_, x)| (*x).clone()).collect::<Vec<_>>();
+        assert_eq!((after, h.state().session.undo_depth()), (doc, depth), "nothing applied");
+    }
+
+    /// #1433: Layout › Size › More Paper Sizes… opens Page Setup.
+    #[test]
+    fn more_paper_sizes_opens_page_setup() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(400.0, 600.0))
+            .build_ui_state(|ui, app: &mut WordApp| crate::ribbon::size_menu(ui, app), app_with("Page"));
+        h.run_steps(2);
+        h.get(egui_kittest::kittest::By::new().label_contains("More Paper Sizes…")).click();
+        h.run_steps(2);
+        assert_eq!(h.state().dialog.as_ref().map(|d| d.name()), Some("pageSetup"));
     }
 }

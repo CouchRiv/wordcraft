@@ -7,7 +7,7 @@ use wordcraft_doc::control::{ContentControl, ControlKind, ControlWrap};
 use wordcraft_doc::effects::{Glow, Shadow, ShapeEffects};
 use wordcraft_doc::graphic::{Embedded, Graphic, GraphicItem, GraphicKind};
 use wordcraft_doc::para::{AltText, Anchor, Float, FloatAlign, NoteKind, ShapeKind, Wrap, WrapText, cap_alt};
-use wordcraft_doc::props::{CharProps, NumChange, PropChange, Rgb};
+use wordcraft_doc::props::{CharProps, NumChange, PropChange, Rgb, TextColor};
 use wordcraft_doc::table::{Cell, MAX_COLS, MAX_ROWS, Row, Table};
 use wordcraft_doc::{Block, Blocks, InlineObject, Paragraph, PartKind, RevisionKind, Run, para_block};
 
@@ -21,6 +21,8 @@ use wordcraft_doc::wordart::TextWarp;
 
 const INK_URI: &str = "http://schemas.microsoft.com/office/word/2010/wordprocessingInk";
 const INK_REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml";
+/// The `a:graphicData` URI of an Office 2016 chart (`cx:chart`).
+const CHARTEX_URI: &str = "http://schemas.microsoft.com/office/drawing/2014/chartex";
 
 /// Deepest table nesting we build (deeper tables become plain paragraphs).
 const MAX_TABLE_DEPTH: usize = 24;
@@ -30,6 +32,8 @@ const MAX_FIELD_DEPTH: usize = 32;
 const MAX_STORY_DEPTH: usize = 4;
 /// Longest field code we keep (Zotero's citation codes embed item data as JSON).
 const MAX_INSTR: usize = 2 * 1024 * 1024;
+/// Longest legacy form field definition (`w:ffData`) we keep.
+const MAX_FORM: usize = 64 * 1024;
 
 /// Inherited run context (from `w:hyperlink`, `w:ins`, `w:del` wrappers).
 #[derive(Clone, Default)]
@@ -65,6 +69,8 @@ struct FieldState {
     /// The font size of each piece of the code (where it starts in `instr`): an enclosure's
     /// style is the size of its symbol and text (see [`wordcraft_doc::eq`]).
     sizes: Vec<(usize, Option<f32>)>,
+    /// A legacy form field's `w:ffData`, as raw XML.
+    form: String,
 }
 
 /// Enclosed characters (`eq \o\ac(○,字)`), with their style from the code's font sizes: Word
@@ -439,7 +445,7 @@ impl Reader<'_> {
             "w:r" => self.read_run(sc, pb, k, rels, ctx, depth),
             "w:hyperlink" => {
                 let mut c = ctx.clone();
-                let url = k.attr("r:id").and_then(|id| rels.by_id(id)).map(|r| r.target.clone());
+                let url = k.attr("r:id").and_then(|id| rels.by_id(id)).map(|r| r.target.trim().to_string()).filter(|u| !u.is_empty());
                 let anchor = k.attr("w:anchor").filter(|a| !a.is_empty());
                 c.link = match (url, anchor) {
                     (Some(u), Some(a)) => Some(format!("{u}#{a}")),
@@ -463,7 +469,7 @@ impl Reader<'_> {
             "w:fldSimple" => {
                 let instr = k.attr("w:instr").unwrap_or("").to_string();
                 let props = k.child("w:r").and_then(|r| r.child("w:rPr")).map(|p| self.run_props(p, ctx)).unwrap_or_else(|| self.run_props_none(ctx));
-                self.begin_field(sc, props, instr, on_off_attr(k, "w:fldLock"));
+                self.begin_field(sc, props, instr, on_off_attr(k, "w:fldLock"), String::new());
                 self.separate_field(sc, pb);
                 self.read_inline_children(sc, pb, k, rels, ctx, depth + 1);
                 self.end_field(sc, pb);
@@ -496,8 +502,11 @@ impl Reader<'_> {
             }
             "w:smartTag" | "w:customXml" | "w:dir" | "w:bdo" => self.read_inline_children(sc, pb, k, rels, ctx, depth + 1),
             "m:oMath" => {
-                let props = self.run_props_none(ctx);
-                let math = super::math::read_omath(k, Default::default());
+                let mut props = self.run_props_none(ctx);
+                let mut math = super::math::read_omath(k, Default::default());
+                if let Some(c) = super::math::lift_color(&mut math) {
+                    props.color = Some(TextColor::Rgb(c));
+                }
                 let linear = wordcraft_doc::math::to_linear(&math.nodes);
                 self.emit_obj(sc, pb, InlineObject::Equation { linear, display: false, math }, &props);
             }
@@ -505,13 +514,17 @@ impl Reader<'_> {
                 let props = self.run_props_none(ctx);
                 let jc = super::math::para_jc(k);
                 for m in k.children("m:oMath") {
-                    let math = super::math::read_omath(m, jc);
+                    let mut math = super::math::read_omath(m, jc);
+                    let mut props = props.clone();
+                    if let Some(c) = super::math::lift_color(&mut math) {
+                        props.color = Some(TextColor::Rgb(c));
+                    }
                     let linear = wordcraft_doc::math::to_linear(&math.nodes);
                     self.emit_obj(sc, pb, InlineObject::Equation { linear, display: true, math }, &props);
                 }
             }
             "mc:AlternateContent" => {
-                if let Some(o) = self.read_ink_alternate(sc, k, rels) {
+                if let Some(o) = self.read_ink_alternate(sc, k, rels).or_else(|| self.read_chartex_alternate(sc, k, rels)) {
                     let props = self.run_props_none(ctx);
                     self.emit_obj(sc, pb, o, &props);
                 } else if let Some(c) = children_of_choice(k) {
@@ -619,7 +632,10 @@ impl Reader<'_> {
                 }
             }
             "w:fldChar" => match k.attr("w:fldCharType") {
-                Some("begin") => self.begin_field(sc, props.clone(), String::new(), on_off_attr(k, "w:fldLock")),
+                Some("begin") => {
+                    let form = k.child("w:ffData").map(|f| f.to_xml()).filter(|x| x.len() <= MAX_FORM).unwrap_or_default();
+                    self.begin_field(sc, props.clone(), String::new(), on_off_attr(k, "w:fldLock"), form)
+                }
                 Some("separate") => self.separate_field(sc, pb),
                 Some("end") => self.end_field(sc, pb),
                 _ => {}
@@ -636,6 +652,11 @@ impl Reader<'_> {
             }
             "w:object" => {
                 if let Some(o) = self.read_object(sc, k, rels) {
+                    self.emit_obj(sc, pb, o, props);
+                }
+            }
+            "w:contentPart" => {
+                if let Some(o) = self.read_ink_content_part(k, rels) {
                     self.emit_obj(sc, pb, o, props);
                 }
             }
@@ -670,12 +691,15 @@ impl Reader<'_> {
                     pb.push_obj(InlineObject::CommentEnd { id: cid }, props);
                 }
             }
-            "w:pgNum" => {
-                self.emit_obj(sc, pb, InlineObject::Field { instr: "PAGE".into(), result: String::new(), locked: false, code: false }, props)
-            }
+            "w:pgNum" => self.emit_obj(
+                sc,
+                pb,
+                InlineObject::Field { instr: "PAGE".into(), result: String::new(), locked: false, code: false, form: String::new() },
+                props,
+            ),
             "w:ruby" => self.read_ruby(sc, pb, k, props),
             "mc:AlternateContent" => {
-                if let Some(o) = self.read_ink_alternate(sc, k, rels) {
+                if let Some(o) = self.read_ink_alternate(sc, k, rels).or_else(|| self.read_chartex_alternate(sc, k, rels)) {
                     self.emit_obj(sc, pb, o, props);
                 } else if let Some(c) = children_of_choice(k) {
                     for x in c.els() {
@@ -744,13 +768,23 @@ impl Reader<'_> {
 
     // ---- fields ----
 
-    fn begin_field(&mut self, sc: &mut StoryCtx, props: CharProps, instr: String, locked: bool) {
+    fn begin_field(&mut self, sc: &mut StoryCtx, props: CharProps, instr: String, locked: bool, form: String) {
         if sc.fields.len() >= MAX_FIELD_DEPTH || sc.ignored_begins > 0 {
             sc.ignored_begins += 1;
             return;
         }
         // Fields nested deeper than the cap are ignored (their content flows to the enclosing field).
-        sc.fields.push(FieldState { instr, phase: Phase::Instr, spilled: false, buf: Vec::new(), props, locked, range: false, sizes: Vec::new() });
+        sc.fields.push(FieldState {
+            instr,
+            phase: Phase::Instr,
+            spilled: false,
+            buf: Vec::new(),
+            props,
+            locked,
+            range: false,
+            sizes: Vec::new(),
+            form,
+        });
     }
 
     /// Whether the field below the innermost one is still collecting its code (a field nested
@@ -801,7 +835,11 @@ impl Reader<'_> {
         // A cached result holding a picture, chart or shape (`INCLUDEPICTURE`'s embedded
         // picture) can't be a text result: keep the field as a range around it so the picture
         // stays in the document and is saved again. The linked source is never read.
-        if !nested_in_instr && f.buf.iter().any(|(it, _)| matches!(it, Item::Obj(o) if o.frame().is_some())) {
+        // A tracked insertion or deletion inside the result (one the field itself isn't wrapped
+        // in) keeps the field a range too: a cached text result has one revision at most, so
+        // each piece stays an ordinary run with its own `w:ins` / `w:del` (#1037).
+        let tracked_inside = f.buf.iter().any(|(_, p)| (p.ins, p.del) != (f.props.ins, f.props.del));
+        if !nested_in_instr && (tracked_inside || f.buf.iter().any(|(it, _)| matches!(it, Item::Obj(o) if o.frame().is_some()))) {
             self.emit_obj(sc, pb, InlineObject::FieldStart { instr: f.instr.trim().to_string(), locked: f.locked }, &f.props);
             for (it, p) in f.buf {
                 match it {
@@ -824,7 +862,7 @@ impl Reader<'_> {
             Some(e) => (e.instr(), if result.is_empty() { e.text } else { result }),
             None => (f.instr.trim().to_string(), result),
         };
-        let obj = InlineObject::Field { instr, result, locked: f.locked, code: false };
+        let obj = InlineObject::Field { instr, result, locked: f.locked, code: false, form: f.form };
         if let Some(parent) = sc.fields.last_mut()
             && !parent.spilled
             && parent.phase == Phase::Instr
@@ -843,7 +881,11 @@ impl Reader<'_> {
                 continue;
             }
             f.spilled = true;
-            pb.push_obj(InlineObject::Field { instr: f.instr.trim().to_string(), result: String::new(), locked: f.locked, code: false }, &f.props);
+            let form = std::mem::take(&mut f.form);
+            pb.push_obj(
+                InlineObject::Field { instr: f.instr.trim().to_string(), result: String::new(), locked: f.locked, code: false, form },
+                &f.props,
+            );
             for (it, p) in f.buf.drain(..) {
                 match it {
                     Item::Text(t) => pb.push_text(&t, &p),
@@ -888,6 +930,7 @@ impl Reader<'_> {
         let (alt, meta) = nv_alt(c.child("wp:docPr"));
         let mut float = if anchored { anchor_float(c) } else { Float::default() };
         float.alt = meta;
+        float.hidden = c.child("wp:docPr").is_some_and(|p| on_off_attr(p, "hidden"));
         if let Some(e) = c.child("wp:effectExtent") {
             for (slot, n) in float.effect.iter_mut().zip(["l", "t", "r", "b"]) {
                 // Negative for a rotated object narrower than its frame; settled below.
@@ -996,6 +1039,40 @@ impl Reader<'_> {
             }
         }
         Some(object)
+    }
+
+    /// An Office 2016 chart (`cx:chart`: waterfall, sunburst, box & whisker…) drawn from its
+    /// fallback picture, keeping both branches so saving writes the chart back rather than only
+    /// the picture. `None` (read the fallback alone) when it can't be kept whole.
+    fn read_chartex_alternate(&mut self, sc: &mut StoryCtx, ac: &El, rels: &Rels) -> Option<InlineObject> {
+        let choice = ac
+            .children("mc:Choice")
+            .find(|c| c.child("w:drawing").and_then(|d| d.find("a:graphicData")).and_then(|g| g.attr("uri")) == Some(CHARTEX_URI))?;
+        // A requirement in a namespace we can't name couldn't be written back.
+        let requires = choice.attr("Requires").unwrap_or("");
+        if requires.split_whitespace().next().is_none() || requires.split_whitespace().any(|p| p == "?") {
+            return None;
+        }
+        let fallback = ac.child("mc:Fallback")?;
+        let kept = El { name: "mc:AlternateContent".into(), attrs: Vec::new(), kids: vec![Node::El(choice.clone()), Node::El(fallback.clone())] };
+        let source = self.keep_embedded(&kept, rels, &[])?;
+        let Some(InlineObject::Image { media, w, h, alt, float, .. }) = self.read_drawing(sc, fallback.child("w:drawing")?, rels) else {
+            return None;
+        };
+        let items = vec![GraphicItem::Image { rect: [0.0, 0.0, w, h], media }];
+        let graphic = Arc::new(Graphic { kind: GraphicKind::Chart, items, w, h, source: Some(source), ..Default::default() });
+        Some(InlineObject::Graphic { w, h, alt, float, graphic })
+    }
+
+    fn read_ink_content_part(&mut self, content: &El, rels: &Rels) -> Option<InlineObject> {
+        let part = super::part_of(rels, content.attr("r:id")?, INK_REL)?;
+        let pkg = self.pkg;
+        if self.content_types.get_or_insert_with(|| ContentTypes::read(pkg)).of(&part) != Some("application/inkml+xml") {
+            return None;
+        }
+        let source = self.keep_embedded(content, rels, &[])?;
+        let graphic = Arc::new(Graphic { kind: GraphicKind::Ink, source: Some(source), ..Default::default() });
+        Some(InlineObject::Graphic { w: 0.0, h: 0.0, alt: String::new(), float: Float::default(), graphic })
     }
 
     /// The chart or SmartArt diagram in an `a:graphicData`, as items in points from its top-left
@@ -1149,8 +1226,9 @@ impl Reader<'_> {
             let max = crate::units::MAX_LEN_PT;
             let fit = |v: f32, lo: f32| wordcraft_geom::finite(v).clamp(lo, max);
             let (w, h) = (fit(ew * sx, 0.0), fit(eh * sy, 0.0));
-            let (alt, meta) = nv_alt(if e.name == "pic:pic" { e.find("pic:cNvPr") } else { e.child("wps:cNvPr") });
-            let float = Float { alt: meta, ..Float::default() };
+            let nv = if e.name == "pic:pic" { e.find("pic:cNvPr") } else { e.child("wps:cNvPr") };
+            let (alt, meta) = nv_alt(nv);
+            let float = Float { alt: meta, hidden: nv.is_some_and(|p| on_off_attr(p, "hidden")), ..Float::default() };
             let obj = if e.name == "pic:pic" {
                 self.read_pic(e, rels, w, h, alt.clone(), float)
             } else {
@@ -1233,6 +1311,14 @@ impl Reader<'_> {
             part.body.auto_fit = bp.child("a:spAutoFit").is_some();
         }
         let mut extra = ShapeExtra::default();
+        // A rounded rectangle's own corner (`adj`, ECMA-376 §20.1.10.56); other presets drawn as
+        // rounded rectangles keep the default.
+        if prst == "roundRect" {
+            extra.corner = sppr
+                .and_then(|s| s.child("a:prstGeom"))
+                .and_then(|g| preset_adj(g, "adj"))
+                .and_then(|v| u32::try_from(v.clamp(0, i64::from(wordcraft_doc::connector::MAX_CORNER))).ok());
+        }
         // Arrowheads: any end type but `none` (ECMA-376 §20.1.10.33) is drawn as a triangle.
         let arrow = |tag: &str| ln.and_then(|l| l.child(tag)).and_then(|e| e.attr("type")).is_some_and(|t| t != "none");
         extra.arrow_start = arrow("a:headEnd");
@@ -1294,10 +1380,35 @@ impl Reader<'_> {
         let stroke = on("stroked").then(|| shape.attr("strokecolor").map_or(Some(Rgb::BLACK), vml_color)).flatten();
         let stroke_width = shape.attr("strokeweight").and_then(|v| measure(v, 1.0)).unwrap_or(0.75).clamp(0.0, 100.0);
         let fill = on("filled").then(|| shape.attr("fillcolor").map_or(Some(Rgb::WHITE), vml_color)).flatten();
-        if let Some(t) = shape.find("w:txbxContent")
+        if let Some((tb, t)) = vml_textbox(shape, 0)
             && sc.story_depth < MAX_STORY_DEPTH
         {
-            let story = Some(self.read_textbox(sc, t, rels));
+            let id = self.read_textbox(sc, t, rels);
+            if let Some(part) = self.doc.parts.get_mut(&id) {
+                // Internal margins `inset="l,t,r,b"` (ECMA-376 Part 4 §19.1.2.22), each one left
+                // out keeping Word's default; a bare number is in EMUs, VML's base unit.
+                // `o:insetmode="auto"` leaves them to the application.
+                let mut inset = wordcraft_doc::TEXT_BOX_INSET;
+                let custom = tb.attr("o:insetmode").is_none_or(|m| !m.eq_ignore_ascii_case("auto"));
+                for (slot, v) in inset.iter_mut().zip(tb.attr("inset").filter(|_| custom).unwrap_or("").split(',')) {
+                    if let Some(pt) = measure(v, 12_700.0) {
+                        *slot = (pt.max(0.0) * 12_700.0).round().min(wordcraft_doc::MAX_TEXT_BOX_INSET as f32) as u32;
+                    }
+                }
+                part.body.inset = (inset != wordcraft_doc::TEXT_BOX_INSET).then_some(inset);
+                // Resize shape to fit text (DrawingML's `a:spAutoFit`).
+                let fit = vml_style(tb.attr("style").unwrap_or(""), "mso-fit-shape-to-text");
+                part.body.auto_fit = fit.is_some_and(|v| v.eq_ignore_ascii_case("t") || v.eq_ignore_ascii_case("true"));
+                // Where the text sits between the box's top and bottom (DrawingML's `anchor`).
+                if let Some(a) = vml_style(style, "v-text-anchor") {
+                    part.body.anchor = match a {
+                        a if a.starts_with("middle") => wordcraft_doc::props::VAlign::Center,
+                        a if a.starts_with("bottom") => wordcraft_doc::props::VAlign::Bottom,
+                        _ => wordcraft_doc::props::VAlign::Top,
+                    };
+                }
+            }
+            let story = Some(id);
             return Some(InlineObject::Shape {
                 kind: ShapeKind::TextBox,
                 w,
@@ -1497,7 +1608,13 @@ fn nv_alt(p: Option<&El>) -> (String, AltText) {
 fn anchor_float(c: &El) -> Float {
     let mut f = Float { wrap: Wrap::Square, ..Float::default() };
     let behind = on_off_attr(c, "behindDoc");
-    for k in c.els() {
+    // Word wraps a position relative to the page's size (`wp14:pctPosVOffset`) in
+    // `mc:AlternateContent`; its Fallback gives the same position as an offset (#743).
+    let kids = c.els().flat_map(|k| match k.name.as_str() {
+        "mc:AlternateContent" => k.child("mc:Fallback").map(|f| f.els().collect()).unwrap_or_default(),
+        _ => vec![k],
+    });
+    for k in kids {
         match k.name.as_str() {
             "wp:wrapSquare" => {
                 f.wrap = Wrap::Square;
@@ -1574,6 +1691,18 @@ fn wrap_polygon(e: &El) -> Option<wordcraft_doc::wrap::WrapPolygon> {
 }
 
 /// The value of property `key` in a VML `style` attribute (CSS declarations; the last one wins).
+/// The first `v:textbox` under `e` holding text, with its `w:txbxContent` (depth-first, bounded
+/// like `El::find`): in a group, a member's margins go with that member's text.
+fn vml_textbox(e: &El, depth: usize) -> Option<(&El, &El)> {
+    if depth > crate::xml::MAX_DEPTH {
+        return None;
+    }
+    e.els().find_map(|c| match c.child("w:txbxContent") {
+        Some(t) if c.name == "v:textbox" => Some((c, t)),
+        _ => vml_textbox(c, depth + 1),
+    })
+}
+
 fn vml_style<'a>(style: &'a str, key: &str) -> Option<&'a str> {
     style.rsplit(';').filter_map(|d| d.split_once(':')).find(|(k, _)| k.trim().eq_ignore_ascii_case(key)).map(|(_, v)| v.trim())
 }
@@ -1586,9 +1715,10 @@ fn vml_style<'a>(style: &'a str, key: &str) -> Option<&'a str> {
 /// `z-index`. Anything else stays inline.
 fn vml_float(shape: &El, style: &str) -> Float {
     let get = |k: &str| vml_style(style, k);
+    let hidden = get("visibility").is_some_and(|v| v.eq_ignore_ascii_case("hidden"));
     if !get("position").is_some_and(|p| p.eq_ignore_ascii_case("absolute")) {
         // Inline: only the turn (an OLE object turned in WordCraft is saved so, #319).
-        let mut f = Float::default();
+        let mut f = Float { hidden, ..Float::default() };
         f.set_spin(vml_spin(style));
         return f;
     }
@@ -1635,6 +1765,7 @@ fn vml_float(shape: &El, style: &str) -> Float {
         dist: dist("mso-wrap-distance-left").max(dist("mso-wrap-distance-right")),
         dist_top: dist("mso-wrap-distance-top"),
         dist_bottom: dist("mso-wrap-distance-bottom"),
+        hidden,
         ..Float::default()
     };
     f.set_spin(vml_spin(style));
@@ -1671,6 +1802,12 @@ fn text_warp(e: &El) -> Option<TextWarp> {
         }
     }
     Some(w)
+}
+
+/// A preset geometry's adjust value `name` (`a:avLst/a:gd` with `fmla="val N"`).
+fn preset_adj(geom: &El, name: &str) -> Option<i64> {
+    let gd = geom.child("a:avLst")?.children("a:gd").find(|g| g.attr("name") == Some(name))?;
+    gd.attr("fmla")?.trim().strip_prefix("val")?.trim().parse::<i64>().ok()
 }
 
 fn effect_list(l: &El) -> ShapeEffects {

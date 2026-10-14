@@ -5,6 +5,7 @@
 //!   (an Ask Agent request id) as that request's agent, its edits tracked under the agent's name
 //! - `engine.commands {search?}`: engine and app print commands with enablement and parameters
 //! - `document.inspect`: document structure; `ui.inspect`: UI state, canvas geometry, perf
+//! - `ui.wheel {x, y, dx?, dy, unit?, phase?}`: a mouse-wheel / trackpad scroll at a window point.
 //! - `ui.click {x, y, button?, count?, shift?, cmd?}`, `ui.move {x, y}`, `ui.drag {x, y, toX, toY}`:
 //!   real pointer input in screen points (reaches every widget)
 //! - `ui.clickText {page, x, y}`: click at a page position (points from the page's top-left)
@@ -112,6 +113,9 @@ fn click_events(app: &mut WordApp, pos: egui::Pos2, button: egui::PointerButton,
     }
 }
 
+/// The reply to a request that needs a document while none is open (#1129).
+const NO_DOCUMENT: &str = "no document is open; create one (file.new) or open one (file.open) first";
+
 pub fn handle(app: &mut WordApp, ctx: &egui::Context, req: &ControlRequest) -> Outcome {
     let previous = std::mem::replace(&mut app.session.human_review_only, req.connection.is_some());
     let result = handle_inner(app, ctx, req);
@@ -182,6 +186,8 @@ fn handle_inner(app: &mut WordApp, ctx: &egui::Context, req: &ControlRequest) ->
             }
             ok(Value::Array(commands))
         }
+        // The Start screen's empty window has no document to inspect or render (#1129).
+        "document.inspect" | "ui.render" if !app.has_document() => err(NO_DOCUMENT),
         "document.inspect" => match app.session.run("document.inspect", p) {
             Ok(v) => ok(v),
             Err(e) => err(e),
@@ -251,6 +257,25 @@ fn handle_inner(app: &mut WordApp, ctx: &egui::Context, req: &ControlRequest) ->
             let m = mods(p);
             app.synthetic.push(egui::Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers: m });
             app.synthetic.push(egui::Event::Key { key: k, physical_key: None, pressed: false, repeat: false, modifiers: m });
+            ok(json!({"queued": true}))
+        }
+        "ui.wheel" => {
+            // Mouse-wheel or trackpad scroll at (x, y): `dy` points (positive scrolls up), or
+            // lines with `"unit": "line"`; `phase` "start"/"move"/"end" for a trackpad gesture.
+            let (Some(x), Some(y)) = (f("x"), f("y")) else { return err("missing x/y") };
+            let unit = match s("unit") {
+                Some("line") => egui::MouseWheelUnit::Line,
+                Some("page") => egui::MouseWheelUnit::Page,
+                _ => egui::MouseWheelUnit::Point,
+            };
+            let phase = match s("phase") {
+                Some("start") => egui::TouchPhase::Start,
+                Some("end") => egui::TouchPhase::End,
+                _ => egui::TouchPhase::Move,
+            };
+            let delta = egui::vec2(f("dx").unwrap_or(0.0), f("dy").unwrap_or(0.0));
+            app.synthetic.push(egui::Event::PointerMoved(egui::pos2(x, y)));
+            app.synthetic.push(egui::Event::MouseWheel { unit, delta, phase, modifiers: mods(p) });
             ok(json!({"queued": true}))
         }
         "ui.text" => {

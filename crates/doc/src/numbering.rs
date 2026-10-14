@@ -75,6 +75,17 @@ pub struct AbstractNum {
     pub id: u32,
     pub name: Option<String>,
     pub levels: Vec<Level>,
+    /// Word's list identity (`w:nsid`, 8 hex digits), which it uses to match lists across
+    /// documents (paste, compare); kept from the file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nsid: Option<String>,
+    /// The list template the definition came from (`w:tmpl`); kept from the file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tmpl: Option<String>,
+    /// `w:multiLevelType` from the file (`singleLevel`, `multilevel`, `hybridMultilevel`);
+    /// `None`: derived from the levels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub multi_level_type: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
@@ -208,6 +219,11 @@ impl Numbering {
         let n = self.num(num)?;
         self.abstracts.iter().find(|a| a.id == n.abstract_id)
     }
+    /// Whether a paragraph in list `num` at `level` gets a label ([`Counters::next_label`] gives
+    /// one), without counting it.
+    pub fn shows_label(&self, num: u32, level: u8) -> bool {
+        self.abstract_of(num).is_some() && self.level(num, level.min(8)).is_some_and(|d| d.format != NumFormat::None)
+    }
     pub fn level(&self, num: u32, level: u8) -> Option<&Level> {
         if let Some((_, l)) = self.num(num)?.level_overrides.iter().find(|(i, _)| *i == level) {
             return Some(l);
@@ -217,7 +233,7 @@ impl Numbering {
     /// Create a new list of `kind`; returns the `num` id.
     pub fn add_list(&mut self, kind: ListKind) -> u32 {
         let aid = self.abstracts.iter().map(|a| a.id + 1).max().unwrap_or(0);
-        self.abstracts.push(AbstractNum { id: aid, name: None, levels: levels_for(kind) });
+        self.abstracts.push(AbstractNum { id: aid, name: None, levels: levels_for(kind), ..Default::default() });
         let nid = self.nums.iter().map(|n| n.id + 1).max().unwrap_or(1).max(1);
         self.nums.push(Num { id: nid, abstract_id: aid, ..Default::default() });
         nid
@@ -251,6 +267,12 @@ pub struct Counters {
 }
 
 impl Counters {
+    /// The current value of each level of `num`'s list (0 for a level not counted yet).
+    pub fn values(&self, numbering: &Numbering, num: u32) -> Option<[u32; 9]> {
+        let abs = numbering.abstract_of(num)?;
+        Some(self.state.get(&abs.id).copied().unwrap_or([0; 9]))
+    }
+
     /// Advance the counter for `num`/`level` and return the label (`"1."`, `"a)"`, `"•"`).
     pub fn next_label(&mut self, numbering: &Numbering, num: u32, level: u8) -> Option<(String, Level)> {
         let n = numbering.num(num)?;
