@@ -1167,11 +1167,13 @@ fn quick_actions(ui: &mut egui::Ui) -> Option<String> {
         Apply::Replace => tl!("Replaces the selection; the change is tracked"),
         Apply::Auto => tl!("Follows the instruction; any changes are tracked"),
     };
-    ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
+    ui.label(egui::RichText::new(tl!("Quick actions")).font(crate::theme::semibold(12.0)));
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().button_padding = vec2(10.0, 4.0);
         for a in &all {
             match a.menu.as_deref() {
                 None => {
-                    if ui.add(egui::Button::new(tl!(&a.label)).frame(false)).on_hover_text(hint(a)).clicked() {
+                    if ui.button(tl!(&a.label)).on_hover_text(hint(a)).clicked() {
                         picked = Some(a.id.clone());
                     }
                 }
