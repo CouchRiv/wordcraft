@@ -97,6 +97,9 @@ display_name = "Martin Ball"
 
 [people.Nghiathan13]
 
+[people.finwarman]
+real_name = "Fin Warman"
+
 [people.albayazid]
 real_name = "Sazid Al Bayazid"
 
@@ -110,5 +113,4 @@ display_name = "The Legend Of MTS Dev"
 [people.dotCooCoo]
 real_name = "Robert Lee"
 
-[people.finwarman]
-real_name = "Fin Warman"
+

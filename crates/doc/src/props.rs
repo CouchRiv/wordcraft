@@ -1074,6 +1074,10 @@ pub struct RowProps {
     pub header: bool,
     /// Don't let the row break across pages.
     pub cant_split: bool,
+    /// Table properties this row overrides (`w:tblPrEx`, ECMA-376 §17.4.61): width, alignment,
+    /// indent, borders, shading, layout and cell margins. `Some` when the file has the element.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exceptions: Option<Box<TableProps>>,
     /// Grid columns skipped before the row's first cell (`w:gridBefore`), and the preferred
     /// width of that gap in points (`w:wBefore`).
     #[serde(skip_serializing_if = "is_zero")]
@@ -1124,6 +1128,9 @@ pub struct CellProps {
     pub margins: Option<[f32; 4]>,
     /// Which way the cell's text runs.
     pub text_direction: TextDirection,
+    /// The file states the horizontal direction (`lrTb`) outright; saving writes it back.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub text_direction_set: bool,
     pub no_wrap: bool,
     /// The cell's last paragraph takes no room when it is empty (`w:hideMark`): a row of such
     /// empty cells shrinks to its borders.

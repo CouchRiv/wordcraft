@@ -386,6 +386,22 @@ mod tests {
     }
 
     #[test]
+    fn arabic_and_persian_fall_back_to_the_craft_fonts_arabic_face() {
+        // #1652: with no system fonts (a headless CLI), Arabic and Persian drew as empty boxes.
+        let Some(arabic) = CRAFT_FONTS.iter().find(|f| f.scripts.contains(&"Arab")) else {
+            eprintln!("skipped: no Arabic face in the optional craft-fonts input");
+            return;
+        };
+        let db = FontDb::with_font_dirs(Vec::new());
+        db.set_system_fallback(false);
+        let latin = db.face(DEFAULT_FAMILY, "Regular");
+        for c in "مرحبا پچژگ۱۲۳".chars().filter(|c| !c.is_whitespace()) {
+            let fb = db.fallback_for(c, latin.id()).unwrap_or_else(|| panic!("no fallback for {c}"));
+            assert_eq!(fb.family, arabic.family, "{c}");
+        }
+    }
+
+    #[test]
     fn works_without_craft_fonts() {
         // Always true without CRAFT_FONTS_DIR; with it, the bundled fonts must still all load.
         let db = FontDb::with_font_dirs(Vec::new());

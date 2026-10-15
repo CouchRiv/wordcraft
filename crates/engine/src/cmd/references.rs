@@ -367,7 +367,21 @@ fn range_toc_to_field(s: &mut Session) -> Result<(), CmdError> {
     let Some(after_end) = r.end.off.checked_add(OBJ.len_utf8()) else { return Ok(()) };
     let end = Pos { off: after_end, ..r.end.clone() };
     let props = s.doc.para_at(&r.start).map(|p| p.props_of_char(r.start.off).clone()).unwrap_or_default();
-    let at = s.doc.delete_range(&r.start, &end)?;
+    let mut at = s.doc.delete_range(&r.start, &end)?;
+    // A range that filled its own paragraphs right under a TOC heading (as Word and other writers
+    // lay it out) leaves an empty paragraph behind, which would show as a blank line above the
+    // entries. The field goes at the end of the heading instead, as `insert_toc` places it.
+    let i = at.path.last();
+    if at.path.depth() == 0
+        && i > 0
+        && s.doc.para_at(&at).is_some_and(|p| p.is_empty())
+        && s.doc.body.get(i - 1).and_then(|b| b.as_para()).is_some_and(|p| p.props.style.as_deref() == Some("TOCHeading"))
+    {
+        s.doc.remove_block(StoryRef::Body, &at.path)?;
+        let heading = Path::top(i - 1);
+        let len = s.doc.para(StoryRef::Body, &heading).map_or(0, |p| p.len());
+        at = Pos { story: StoryRef::Body, path: heading, off: len };
+    }
     let field = InlineObject::Field { instr: r.instr.trim().to_string(), result: String::new(), locked: false, code: false, form: String::new() };
     let after = s.doc.insert_object(&at, field, &props)?;
     if s.doc.para_at(&after).is_some_and(|p| after.off < p.len()) {
@@ -493,7 +507,10 @@ fn regenerate_toc(s: &mut Session, leader: Option<TabLeader>) -> Result<(), CmdE
     for i in (start + 1..=end).rev() {
         s.doc.remove_block(StoryRef::Body, &Path::top(i))?;
     }
-    let width = super::page::sect(s).text_width();
+    // The text width of the TOC's own section, not the caret's: after Select All the caret sits
+    // at the end of the document, possibly in a wider (landscape) section.
+    let section = s.doc.section_index_of(start);
+    let width = s.doc.sections().get(section).map_or_else(|| super::page::sect(s).text_width(), |(_, x)| x.text_width());
     let entries = toc_entries(s, &f);
     let links: Vec<Option<String>> = if f.has('h') {
         let mut v = Vec::new();
@@ -530,13 +547,33 @@ fn regenerate_toc(s: &mut Session, leader: Option<TabLeader>) -> Result<(), CmdE
             let mut para = Paragraph::with_text(&text, props).styled(&format!("TOC{}", e.level + 1));
             para.mark = CharProps::default();
             if show_page && sep.contains('\t') {
-                para.props.tabs = Some(vec![TabStop { pos: width - 0.5, align: TabAlign::Right, leader }]);
+                let right = TabStop { pos: width - 0.5, align: TabAlign::Right, leader };
+                para.props.tabs = Some(entry_tabs(s, &para.props, &e.text, right));
             }
             s.doc.insert_block(StoryRef::Body, &Path::top(start + 1 + k), Block::Para(para))?;
         }
     }
     s.touch();
     Ok(())
+}
+
+/// The tab stops of a TOC entry: the right-aligned stop for its page number, and, when the
+/// entry text itself has no tab, Clear stops for the left, centre and decimal stops its style
+/// sets before that. Those stops are for a number set off by a tab (`1.1<tab>Title`); with the
+/// number set off by a space, or no number, a short entry's page tab would stop at one of them
+/// (without the leader), and so would the tab on the last line of an entry that wraps.
+fn entry_tabs(s: &Session, props: &wordcraft_doc::ParaProps, text: &str, right: TabStop) -> Vec<TabStop> {
+    let mut tabs = Vec::new();
+    if !text.contains('\t') {
+        let style = s.doc.styles.resolve_para(&wordcraft_doc::ParaProps { style: props.style.clone(), ..Default::default() });
+        for t in style.tabs {
+            if t.pos < right.pos - 0.5 && !matches!(t.align, TabAlign::Right | TabAlign::Bar) {
+                tabs.push(TabStop { pos: t.pos, align: TabAlign::Clear, leader: TabLeader::None });
+            }
+        }
+    }
+    tabs.push(right);
+    tabs
 }
 
 fn note(s: &mut Session, v: &Value, kind: NoteKind) -> CmdResult {

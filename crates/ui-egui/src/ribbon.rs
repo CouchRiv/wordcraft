@@ -132,7 +132,7 @@ pub fn contextual_tabs(s: &wordcraft_engine::Session) -> Vec<&'static str> {
 
 /// Tab to show when the stored tab is no longer applicable (pure, tested).
 pub fn resolve_tab<'a>(current: &'a str, available: &[&str]) -> &'a str {
-    if available.contains(&current) { current } else { "Home" }
+    if available.contains(&current) { current } else { crate::DEFAULT_TAB }
 }
 
 /// Width of the » button that holds the tabs the strip has no room for.
