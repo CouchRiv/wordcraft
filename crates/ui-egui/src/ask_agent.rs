@@ -46,9 +46,9 @@ const KEEP: usize = 20;
 #[cfg(test)]
 const SHOWN: usize = 3;
 /// Width of the instruction box and the requests card.
-const WIDTH: f32 = 340.0;
+const WIDTH: f32 = 360.0;
 /// Width for a long answer, which wraps rather than being cut.
-const WIDE: f32 = 440.0;
+const WIDE: f32 = 420.0;
 
 /// Where a request is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -665,8 +665,8 @@ pub fn chip_pos(first_line: Rect, end: Option<(Pos2, f32)>, size: Vec2, viewport
 }
 
 /// Space between the selection and the chip or bubble.
-const GAP: f32 = 6.0;
-const CHIP_H: f32 = 24.0;
+const GAP: f32 = 8.0;
+const CHIP_H: f32 = 28.0;
 
 /// Where the chip was drawn last frame, kept in the context's memory for tests.
 pub fn chip_id() -> egui::Id {
@@ -703,7 +703,7 @@ fn show_chip(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) {
     let label = tl!("Ask Agent").to_string();
     let font = crate::theme::regular(12.0);
     let text_w = ctx.fonts_mut(|f| f.layout_no_wrap(label.clone(), font.clone(), t.text).size().x);
-    let size = vec2(text_w + 34.0, CHIP_H);
+    let size = vec2(text_w + 44.0, CHIP_H);
     // The mini toolbar is drawn this frame exactly when it is on and may show (`chip_visible`
     // already asked `mini_toolbar::visible`).
     let bar = app.ui.mini_toolbar.then(|| crate::mini_toolbar::anchor_rect(first_line.min.y, first_line.min.x, viewport)).flatten();
@@ -714,10 +714,15 @@ fn show_chip(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) {
         let p = ui.painter();
         p.rect_filled(r.translate(vec2(0.0, 1.5)), egui::CornerRadius::same(6), t.page_shadow);
         p.rect_filled(r, egui::CornerRadius::same(6), if resp.hovered() { t.hover } else { t.menu });
-        p.rect_stroke(r, egui::CornerRadius::same(6), egui::Stroke::new(1.0, t.border_strong), egui::StrokeKind::Inside);
-        let icon = Rect::from_center_size(pos2(r.min.x + 14.0, r.center().y), vec2(16.0, 16.0));
-        crate::icons::paint(p, icon, "askAgent", t.icon, t.accent);
-        p.text(pos2(r.min.x + 26.0, r.center().y), Align2::LEFT_CENTER, &label, font.clone(), t.text);
+        p.rect_stroke(
+            r,
+            egui::CornerRadius::same(6),
+            egui::Stroke::new(if resp.has_focus() { 2.0 } else { 1.0 }, if resp.has_focus() { t.accent } else { t.border_strong }),
+            egui::StrokeKind::Inside,
+        );
+        let icon = Rect::from_center_size(pos2(r.min.x + 18.0, r.center().y), vec2(16.0, 16.0));
+        crate::icons::paint(p, icon, "comment", t.icon, t.accent);
+        p.text(pos2(r.min.x + 34.0, r.center().y), Align2::LEFT_CENTER, &label, font.clone(), t.text);
         let sc = crate::widgets::shortcut_text(app, "ui.askAgent");
         let resp = resp.on_hover_text(format!("{label} ({sc})"));
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label));
@@ -741,8 +746,9 @@ fn show_bubble(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) -> Option
         return None;
     }
     let at = crate::canvas::pos_screen(app, &anchor);
-    let width = if current.as_ref().is_some_and(|r| r.reply.chars().count() > 160) { WIDE } else { WIDTH };
-    let pos = bubble_pos(at, vec2(width, 170.0), viewport)?;
+    let width = (if current.as_ref().is_some_and(|r| !r.state.open()) { WIDE } else { WIDTH }).min((viewport.width() - 64.0).max(24.0));
+    let last_size = ctx.data(|d| d.get_temp::<Vec2>(egui::Id::new("wc_ask_agent_size"))).unwrap_or(vec2(width + 32.0, 300.0));
+    let pos = bubble_pos(at, last_size, viewport.shrink(16.0))?;
     let present = hub.as_ref().is_some_and(AgentHub::agent_present);
     let animate = app.animations_on();
     let edit_id = egui::Id::new("wc_ask_agent_text");
@@ -762,92 +768,117 @@ fn show_bubble(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) -> Option
     };
     let mut act = BubbleAct::None;
     let t = Tokens::get(ctx);
-    let shown = egui::Area::new(egui::Id::new("wc_ask_agent")).order(Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
-        let card_response = card(&t).show(ui, |ui| {
-            ui.set_width(width);
-            if header(ui, &t) {
-                act = BubbleAct::Close;
-            }
-            match &current {
-                None => {
-                    let about = if chars == 0 {
-                        tl!("No text is selected: the agent gets the caret's place.").to_string()
-                    } else {
-                        crate::i18n::fmt(tl!("The agent gets the selected text ({count} characters)."), &[("count", &chars.to_string())])
-                    };
-                    ui.label(egui::RichText::new(about).small().weak());
-                    // Enter sends, Shift+Enter starts a new line, Up in an empty box brings back the
-                    // last instruction.
-                    let enter = typing && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
-                    let history = app.ask_agent.history.clone();
-                    let empty = app.ask_agent.bubble.as_ref().is_some_and(|b| b.text.is_empty());
-                    let up = typing && empty && !history.is_empty() && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowUp));
-                    let Some(b) = app.ask_agent.bubble.as_mut() else { return };
-                    if let (true, Some(last)) = (up, history.first()) {
-                        b.text = last.clone();
-                    }
-                    let edit = ui.add(
-                        egui::TextEdit::multiline(&mut b.text)
-                            .id(edit_id)
-                            .event_filter(egui::EventFilter { escape: true, horizontal_arrows: true, vertical_arrows: true, tab: false })
-                            .hint_text(tl!("Ask agent to…"))
-                            .desired_rows(2)
-                            .desired_width(f32::INFINITY),
-                    );
-                    if !b.focused {
-                        edit.request_focus();
-                        b.focused = true;
-                    }
-                    if up {
-                        // The caret at the end of the recalled text.
-                        let end = b.text.chars().count();
-                        if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), edit_id) {
-                            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(end))));
-                            state.store(ui.ctx(), edit_id);
+    let shown =
+        egui::Area::new(egui::Id::new("wc_ask_agent")).order(Order::Foreground).constrain_to(viewport.shrink(16.0)).fixed_pos(pos).show(ctx, |ui| {
+            let card_response = card(&t).show(ui, |ui| {
+                ui.set_width(width);
+                visual_spacing(ui, &t);
+                if header(ui, &t) {
+                    act = BubbleAct::Close;
+                }
+                match &current {
+                    None => {
+                        let about = if chars == 0 {
+                            tl!("No text is selected: the agent gets the caret's place.").to_string()
+                        } else {
+                            crate::i18n::fmt(tl!("The agent gets the selected text ({count} characters)."), &[("count", &chars.to_string())])
+                        };
+                        ui.label(egui::RichText::new(about).size(12.0).color(t.text_dim));
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new(tl!("Instruction")).font(crate::theme::semibold(12.0)));
+                        // Enter sends, Shift+Enter starts a new line, Up in an empty box brings back the
+                        // last instruction.
+                        let enter = typing && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+                        let history = app.ask_agent.history.clone();
+                        let empty = app.ask_agent.bubble.as_ref().is_some_and(|b| b.text.is_empty());
+                        let up = typing && empty && !history.is_empty() && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowUp));
+                        let Some(b) = app.ask_agent.bubble.as_mut() else { return };
+                        if let (true, Some(last)) = (up, history.first()) {
+                            b.text = last.clone();
                         }
-                    }
-                    ui.label(egui::RichText::new(tl!("Enter to send, Shift+Enter for a new line")).small().color(t.text_dim));
-                    let has_text = !b.text.trim().is_empty();
-                    if !has_text && !history.is_empty() {
-                        ui.label(egui::RichText::new(tl!("Recent")).small().weak());
-                        for h in history.iter().take(HISTORY_SHOWN) {
-                            // A recent instruction fills the box, to send as it is or change first.
-                            if ui.add(egui::Label::new(h.as_str()).truncate().sense(egui::Sense::click())).on_hover_text(h.as_str()).clicked() {
-                                b.text = h.clone();
-                                edit.request_focus();
+                        let edit = egui::ScrollArea::vertical()
+                            .id_salt("wc_ask_agent_draft_scroll")
+                            .max_height(80.0)
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut b.text)
+                                        .id(edit_id)
+                                        .event_filter(egui::EventFilter { escape: true, horizontal_arrows: true, vertical_arrows: true, tab: false })
+                                        .hint_text(tl!("Ask agent to…"))
+                                        .font(crate::theme::regular(13.0))
+                                        .margin(vec2(10.0, 10.0))
+                                        .desired_rows(3)
+                                        .desired_width(f32::INFINITY),
+                                )
+                            })
+                            .inner;
+                        if !b.focused {
+                            edit.request_focus();
+                            b.focused = true;
+                        }
+                        if up {
+                            // The caret at the end of the recalled text.
+                            let end = b.text.chars().count();
+                            if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), edit_id) {
+                                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(end))));
+                                state.store(ui.ctx(), edit_id);
                             }
                         }
-                    }
-                    ui.horizontal(|ui| {
-                        if ui.add_enabled(has_text, egui::Button::new(tl!("Send"))).clicked() || (enter && has_text) {
-                            act = BubbleAct::Send;
-                        }
-                        if ui.button(tl!("Cancel")).clicked() {
-                            act = BubbleAct::Close;
-                        }
-                    });
-                }
-                Some(r) => {
-                    // The instruction, in grey, then where it stands.
-                    ui.add(egui::Label::new(egui::RichText::new(&r.instruction).small().color(t.text_dim)).truncate()).on_hover_text(&r.instruction);
-                    status(ui, r, present, animate);
-                    ui.horizontal(|ui| {
-                        if r.state.open() {
-                            if ui.button(tl!("Cancel")).clicked() {
-                                act = BubbleAct::Cancel(r.id);
+                        ui.label(egui::RichText::new(tl!("Enter to send, Shift+Enter for a new line")).size(12.0).color(t.text_dim));
+                        ui.label(egui::RichText::new(tl!("Esc to close")).size(12.0).color(t.text_dim));
+                        let has_text = !b.text.trim().is_empty() && b.text.trim().chars().count() <= MAX_TEXT_CHARS;
+                        if !has_text && !history.is_empty() {
+                            ui.label(egui::RichText::new(tl!("Recent")).size(12.0).color(t.text_dim));
+                            for h in history.iter().take(HISTORY_SHOWN) {
+                                // A recent instruction fills the box, to send as it is or change first.
+                                if ui.add(egui::Label::new(h.as_str()).truncate().sense(egui::Sense::click())).on_hover_text(h.as_str()).clicked() {
+                                    b.text = h.clone();
+                                    edit.request_focus();
+                                }
                             }
-                        } else if ui.button(tl!("Close")).clicked() {
-                            act = BubbleAct::Close;
                         }
-                    });
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(has_text, egui::Button::new(egui::RichText::new(tl!("Send")).color(t.on_accent)).fill(t.accent))
+                                .clicked()
+                                || (enter && has_text)
+                            {
+                                act = BubbleAct::Send;
+                            }
+                            if ui.button(tl!("Close")).clicked() {
+                                act = BubbleAct::Close;
+                            }
+                        });
+                    }
+                    Some(r) => {
+                        ui.label(egui::RichText::new(tl!("Instruction")).font(crate::theme::semibold(12.0)));
+                        egui::ScrollArea::vertical().id_salt(("wc_ask_agent_instruction", r.id)).max_height(64.0).show(ui, |ui| {
+                            ui.add(egui::Label::new(egui::RichText::new(&r.instruction).size(13.0)).wrap());
+                        });
+                        ui.separator();
+                        status(ui, r, present, animate);
+                        ui.horizontal(|ui| {
+                            if r.state.open() {
+                                if ui.button(tl!("Stop")).clicked() {
+                                    act = BubbleAct::Cancel(r.id);
+                                }
+                            } else if ui.button(tl!("Close")).clicked() {
+                                act = BubbleAct::Close;
+                            }
+                        });
+                    }
                 }
-            }
+            });
+            ui.interact(card_response.response.rect, egui::Id::new("wc_ask_agent_focus"), egui::Sense::focusable_noninteractive());
         });
-        ui.interact(card_response.response.rect, egui::Id::new("wc_ask_agent_focus"), egui::Sense::focusable_noninteractive());
-    });
     // Escape (when it is the bubble's), or a press in the document outside the bubble, closes it
     // (a request it sent goes on in the corner card; an answered one is put away).
     let rect = shown.response.rect;
+    ctx.data_mut(|d| {
+        d.insert_temp(egui::Id::new("wc_ask_agent_size"), rect.size());
+        d.insert_temp(egui::Id::new("wc_ask_agent_rect"), rect);
+    });
     let bubble_focus = egui::Id::new("wc_ask_agent_focus");
     // The answered bubble has no text box. Clicking its text gives its container keyboard
     // focus, so Escape can close it without taking Escape from the document or another pane.
@@ -914,48 +945,65 @@ fn status(ui: &mut egui::Ui, r: &Request, present: bool, animate: bool) {
         ui.horizontal(|ui| {
             if animate {
                 ui.add(egui::Spinner::new().size(12.0).color(t.accent));
-            } else {
-                // The seconds still count.
-                ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
             }
-            ui.label(text);
-            ui.label(egui::RichText::new(crate::i18n::fmt(tl!("{seconds} s"), &[("seconds", &secs.to_string())])).small().color(t.text_dim));
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
+            ui.label(egui::RichText::new(text).size(13.0));
+            ui.label(egui::RichText::new(crate::i18n::fmt(tl!("{seconds} s"), &[("seconds", &secs.to_string())])).size(12.0).color(t.text_dim));
         });
     };
     match r.state {
         State::Waiting if present => busy(ui, tl!("Sent to your agent…")),
         State::Waiting => {
             busy(ui, tl!("Waiting for an agent…"));
-            ui.label(egui::RichText::new(tl!("No agent is listening right now.")).small().weak());
+            ui.label(egui::RichText::new(tl!("No agent is listening right now.")).size(12.0).color(t.text_dim));
         }
         State::Working => {
             busy(ui, tl!("Your agent is working…"));
             // Its latest progress note.
             if !r.reply.is_empty() {
-                ui.add(egui::Label::new(r.reply.as_str()).wrap());
+                ui.add(egui::Label::new(egui::RichText::new(&r.reply).size(13.0)).wrap());
             }
         }
         // The agent's own words: shown whole, as it wrote them, selectable to copy.
-        State::Answered if r.reply.is_empty() => drop(ui.label(tl!("Done."))),
+        State::Answered if r.reply.is_empty() => drop(ui.label(tl!("Ready"))),
         State::Answered => {
-            egui::ScrollArea::vertical().id_salt(("wc_ask_agent_reply", r.id)).max_height(260.0).auto_shrink([false, true]).show(ui, |ui| {
-                ui.add(egui::Label::new(r.reply.as_str()).selectable(true).wrap());
-            });
+            ui.label(tl!("Ready"));
+            egui::ScrollArea::vertical()
+                .id_salt(("wc_ask_agent_reply", r.id))
+                .max_height((ui.ctx().content_rect().height() - 400.0).clamp(24.0, 260.0))
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.add(egui::Label::new(egui::RichText::new(&r.reply).size(13.0)).selectable(true).wrap());
+                });
         }
-        State::Failed => drop(ui.label(egui::RichText::new(tl!("Failed")).weak())),
+        State::Failed => {
+            ui.label(egui::RichText::new(tl!("Failed")).color(t.red));
+            if let Some(error) = &r.failure {
+                ui.add(egui::Label::new(egui::RichText::new(error).size(13.0).color(t.red)).wrap());
+            }
+        }
         State::Cancelled => drop(ui.label(egui::RichText::new(tl!("Cancelled")).weak())),
     }
 }
 
-/// The bubble's and the card's look: the mini toolbar's (menu fill, strong border, 6 pt corners,
-/// a soft shadow), with room inside.
+/// Shared readable sizing and native focus treatment for floating controls.
+fn visual_spacing(ui: &mut egui::Ui, t: &Tokens) {
+    ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+    ui.spacing_mut().button_padding = vec2(12.0, 6.0);
+    ui.spacing_mut().interact_size.y = 30.0;
+    ui.style_mut().override_font_id = Some(crate::theme::regular(13.0));
+    ui.visuals_mut().selection.stroke = egui::Stroke::new(2.0, t.accent);
+    ui.visuals_mut().widgets.active.bg_stroke = egui::Stroke::new(2.0, t.accent);
+}
+
+/// The bubble and requests card use the native menu surface and shadow.
 fn card(t: &Tokens) -> egui::Frame {
     egui::Frame::new()
         .fill(t.menu)
         .stroke(egui::Stroke::new(1.0, t.border_strong))
-        .corner_radius(egui::CornerRadius::same(6))
-        .inner_margin(egui::Margin::same(10))
-        .shadow(egui::Shadow { offset: [0, 2], blur: 8, spread: 0, color: t.page_shadow })
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(egui::Margin::same(16))
+        .shadow(egui::Shadow { offset: [0, 4], blur: 16, spread: 0, color: t.page_shadow })
 }
 
 /// The bubble's title row: the Ask Agent icon and name, and a close button. True when the close
@@ -963,8 +1011,8 @@ fn card(t: &Tokens) -> egui::Frame {
 fn header(ui: &mut egui::Ui, t: &Tokens) -> bool {
     ui.horizontal(|ui| {
         let (icon, _) = ui.allocate_exact_size(vec2(16.0, 16.0), egui::Sense::hover());
-        crate::icons::paint(ui.painter(), icon, "askAgent", t.icon, t.accent);
-        ui.label(egui::RichText::new(tl!("Ask Agent")).font(crate::theme::semibold(12.5)).color(t.text));
+        crate::icons::paint(ui.painter(), icon, "comment", t.icon, t.accent);
+        ui.label(egui::RichText::new(tl!("Ask Agent")).font(crate::theme::semibold(14.0)).color(t.text));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| close_button(ui, t)).inner
     })
     .inner
@@ -972,7 +1020,10 @@ fn header(ui: &mut egui::Ui, t: &Tokens) -> bool {
 
 /// A small × like the panes' close buttons: a hover square and two strokes.
 fn close_button(ui: &mut egui::Ui, t: &Tokens) -> bool {
-    let (r, resp) = ui.allocate_exact_size(vec2(18.0, 18.0), egui::Sense::click());
+    let (r, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), egui::Sense::click());
+    if resp.has_focus() {
+        ui.painter().rect_stroke(r, egui::CornerRadius::same(4), egui::Stroke::new(2.0, t.accent), egui::StrokeKind::Inside);
+    }
     if resp.hovered() {
         ui.painter().rect_filled(r, egui::CornerRadius::same(4), t.hover);
     }
@@ -992,15 +1043,32 @@ fn show_requests(app: &mut WordApp, ctx: &egui::Context, viewport: Rect, in_bubb
     if requests.is_empty() {
         return;
     }
-    if app.ask_agent.card_collapsed {
+    let corner = viewport.right_bottom() - vec2(16.0, 16.0);
+    let bubble_rect = app.ask_agent.bubble.as_ref().and_then(|_| ctx.data(|d| d.get_temp::<Rect>(egui::Id::new("wc_ask_agent_rect"))));
+    let card_bounds = Rect::from_min_max(corner - vec2(WIDTH + 32.0, viewport.height() * 0.45 + 70.0), corner);
+    let overlaps_bubble = bubble_rect.is_some_and(|r| r.intersects(card_bounds));
+    if app.ask_agent.card_collapsed || overlaps_bubble {
+        let corner = if overlaps_bubble {
+            let badge_size = vec2(200.0, 30.0);
+            [viewport.right_top() + vec2(-16.0, 46.0), viewport.left_bottom() + vec2(216.0, -16.0), viewport.left_top() + vec2(216.0, 46.0), corner]
+                .into_iter()
+                .find(|p| bubble_rect.is_none_or(|r| !r.intersects(Rect::from_min_max(*p - badge_size, *p))))
+                .unwrap_or(corner)
+        } else {
+            corner
+        };
         let open = egui::Area::new(egui::Id::new("wc_ask_agent_requests_collapsed"))
             .order(Order::Foreground)
             .pivot(Align2::RIGHT_BOTTOM)
-            .fixed_pos(viewport.right_bottom() - vec2(16.0, 16.0))
-            .show(ctx, |ui| ui.button(format!("{} ({})", tl!("Ask Agent"), requests.len())).clicked())
+            .fixed_pos(corner)
+            .show(ctx, |ui| ui.button(format!("{} ({})", tl!("Requests"), requests.len())).clicked())
             .inner;
         if open {
             app.ask_agent.card_collapsed = false;
+            if overlaps_bubble {
+                close_bubble(app);
+                app.canvas.want_focus = true;
+            }
         }
         return;
     }
@@ -1014,24 +1082,27 @@ fn show_requests(app: &mut WordApp, ctx: &egui::Context, viewport: Rect, in_bubb
         .fixed_pos(viewport.right_bottom() - vec2(16.0, 16.0))
         .show(ctx, |ui| {
             card(&t).show(ui, |ui| {
-                ui.set_width(WIDTH);
-                let mut close = false;
-                if header(ui, &t) {
-                    close = true;
-                }
-                egui::ScrollArea::vertical().max_height(viewport.height() * 0.6).show(ui, |ui| {
+                ui.set_width(WIDTH.min((viewport.width() - 64.0).max(24.0)));
+                visual_spacing(ui, &t);
+                let close = ui
+                    .horizontal(|ui| {
+                        ui.label(egui::RichText::new(format!("{} ({})", tl!("Requests"), requests.len())).font(crate::theme::semibold(13.0)));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| close_button(ui, &t)).inner
+                    })
+                    .inner;
+                egui::ScrollArea::vertical().max_height(viewport.height() * 0.45).show(ui, |ui| {
                     for r in &requests {
                         ui.separator();
-                        ui.add(egui::Label::new(egui::RichText::new(&r.instruction).small().color(t.text_dim)).truncate());
+                        ui.add(egui::Label::new(egui::RichText::new(&r.instruction).size(12.0).color(t.text_dim)).truncate());
                         status(ui, r, present, animate);
-                        if ui.small_button(tl!("Open request")).clicked() {
+                        if ui.button(tl!("Open request")).clicked() {
                             reopen = Some(r.id);
                         }
                         if r.state.open() {
-                            if ui.small_button(tl!("Cancel")).clicked() {
+                            if ui.button(tl!("Stop")).clicked() {
                                 hub.cancel(r.id);
                             }
-                        } else if ui.small_button(tl!("Dismiss")).clicked() {
+                        } else if ui.button(tl!("Dismiss")).clicked() {
                             hub.dismiss(r.id);
                         }
                     }
@@ -1235,9 +1306,9 @@ mod tests {
         let chip = vec2(100.0, CHIP_H);
         let line = Rect::from_min_size(pos2(100.0, 300.0), vec2(200.0, 18.0));
         let bar = Rect::from_min_size(pos2(80.0, 226.0), vec2(300.0, 60.0));
-        assert_eq!(chip_pos(line, None, chip, view, Some(bar)), Some(pos2(386.0, 226.0)));
+        assert_eq!(chip_pos(line, None, chip, view, Some(bar)), Some(pos2(388.0, 226.0)));
         let right_edge = Rect::from_min_size(pos2(500.0, 226.0), vec2(296.0, 60.0));
-        assert_eq!(chip_pos(line, None, chip, view, Some(right_edge)), Some(pos2(394.0, 226.0)), "left of the bar");
+        assert_eq!(chip_pos(line, None, chip, view, Some(right_edge)), Some(pos2(392.0, 226.0)), "left of the bar");
         let wide = Rect::from_min_size(pos2(0.0, 226.0), vec2(800.0, 60.0));
         let p = chip_pos(line, None, chip, view, Some(wide)).unwrap();
         assert!(p.y >= wide.bottom() && view.contains_rect(Rect::from_min_size(p, chip)), "{p:?}");
@@ -1401,7 +1472,7 @@ mod tests {
         steps(&mut h);
         key(&mut h, Key::Enter, Modifiers::NONE);
         let r = hub.listen(Duration::from_millis(10), || true).expect("queued");
-        let cancel = h.get_by_label("Cancel").rect().center();
+        let cancel = h.get_by_label("Stop").rect().center();
         click(&mut h, cancel);
         assert_eq!(hub.reply(r.id, "Traduit.", true).unwrap()["cancelled"], true, "the agent learns it was cancelled");
     }
