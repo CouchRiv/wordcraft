@@ -202,7 +202,7 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context, _viewport: Rect) {
         comment_once(app, s);
     }
     let agents = hub.agents();
-    let view = ui::View { snapshot: snapshot.as_ref(), agents: &agents };
+    let view = ui::View { snapshot: snapshot.as_ref(), agents: &agents, actions: QUICK_ACTIONS };
     match ui::bubble(ctx, anchor, &view, &mut app.ask_agent.draft, &mut app.ask_agent.picked) {
         Some(ui::Action::Send(text)) => send(app, text),
         Some(ui::Action::Undo) => {
@@ -240,6 +240,25 @@ fn comment_once(app: &mut WordApp, s: &Snapshot) {
     app.session.sel = sel;
     app.session.author = author;
 }
+
+const QUICK_ACTIONS: &[ui::QuickAction] = &[
+    ui::QuickAction { label: "Shorten", group: "", instruction: "Shorten the selected text, preserving its facts and meaning." },
+    ui::QuickAction { label: "Fix grammar", group: "", instruction: "Correct grammar and spelling in the selected text, preserving its meaning." },
+    ui::QuickAction {
+        label: "Professional",
+        group: "Rewrite",
+        instruction: "Rewrite the selected text in a professional tone, preserving the facts.",
+    },
+    ui::QuickAction { label: "Friendly", group: "Rewrite", instruction: "Rewrite the selected text in a friendly tone, preserving the facts." },
+    ui::QuickAction { label: "Concise", group: "Rewrite", instruction: "Rewrite the selected text concisely, preserving the facts." },
+    ui::QuickAction { label: "English", group: "Translate", instruction: "Translate the selected text into English, preserving its formatting." },
+    ui::QuickAction { label: "French", group: "Translate", instruction: "Translate the selected text into French, preserving its formatting." },
+    ui::QuickAction {
+        label: "Summarize",
+        group: "",
+        instruction: "Summarize the selected text and insert the summary below it, keeping the original text.",
+    },
+];
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

@@ -19,10 +19,19 @@ pub enum Action {
     Close,
 }
 
+/// A shortcut that only prepares an editable instruction; Send remains explicit.
+#[derive(Clone, Copy, Debug)]
+pub struct QuickAction {
+    pub label: &'static str,
+    pub group: &'static str,
+    pub instruction: &'static str,
+}
+
 /// What the bubble shows: the current request, if any, and the agents listening.
 pub struct View<'a> {
     pub snapshot: Option<&'a Snapshot>,
     pub agents: &'a [String],
+    pub actions: &'a [QuickAction],
 }
 
 const WIDTH: f32 = 340.0;
@@ -100,6 +109,9 @@ pub fn bubble(ctx: &egui::Context, anchor: Rect, view: &View, draft: &mut String
                 None => picker(ui, view.agents, picked),
             }
             if matches!(status, None | Some(Status::Answered | Status::Failed)) {
+                if matches!(status, None | Some(Status::Answered)) && !view.actions.is_empty() {
+                    quick_actions(ui, view.actions, draft);
+                }
                 let hint = if status.is_none() { tr(ctx, "What should the agent do?") } else { tr(ctx, "Reply to refine…") };
                 let field = ui.add(egui::TextEdit::multiline(draft).hint_text(hint).desired_rows(2).desired_width(f32::INFINITY));
                 if status.is_none() && !field.has_focus() && draft.is_empty() {
@@ -116,6 +128,31 @@ pub fn bubble(ctx: &egui::Context, anchor: Rect, view: &View, draft: &mut String
         });
     });
     action
+}
+
+/// Native menus keep less common actions out of the writing surface.
+fn quick_actions(ui: &mut egui::Ui, actions: &[QuickAction], draft: &mut String) {
+    ui.menu_button(tr(ui.ctx(), "Actions"), |ui| {
+        for (index, action) in actions.iter().enumerate() {
+            if action.group.is_empty() {
+                if ui.button(tr(ui.ctx(), action.label)).clicked() {
+                    *draft = action.instruction.into();
+                    ui.close();
+                }
+            } else if !actions[..index].iter().any(|previous| previous.group == action.group) {
+                ui.menu_button(tr(ui.ctx(), action.group), |ui| {
+                    for action in actions.iter().filter(|item| item.group == action.group) {
+                        if ui.button(tr(ui.ctx(), action.label)).clicked() {
+                            *draft = action.instruction.into();
+                            ui.close();
+                        }
+                    }
+                });
+            }
+        }
+    })
+    .response
+    .on_hover_text(tr(ui.ctx(), "Choose a starting instruction, then edit and send"));
 }
 
 /// Who the request goes to, when more than one agent listens.
