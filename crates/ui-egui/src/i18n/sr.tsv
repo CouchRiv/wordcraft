@@ -2184,6 +2184,24 @@
 	Suggested	Предлози
 	Set Proofing Language…	Постави језик провере…
 	Language Preferences…	Језичке поставке…
+	Printer	Штампач
+	Select a printer	Изаберите штампач
+	Refresh printers	Освежи штампаче
+	Two-sided printing	Двострано штампање
+	Printer default	Подразумевано штампача
+	One-sided	Једнострано
+	Two-sided: long edge	Двострано: дужа ивица
+	Two-sided: short edge	Двострано: краћа ивица
+	Grayscale	Сиви тонови
+	Finding printers…	Проналажење штампача…
+	No printers found. Configure a system printer or export a PDF.	Нису пронађени штампачи. Подесите системски штампач или извезите PDF.
+	Printer discovery failed.	Проналажење штампача није успело.
+	Submitting print job…	Слање задатка за штампање…
+	Print job submitted.	Задатак за штампање је послат.
+	Print job submitted: {receipt}	Задатак за штампање је послат: {receipt}
+	Print failed: the printing worker stopped.	Штампање није успело: процес штампања је заустављен.
+	Print settings	Подешавања штампања
+	Submit print job	Пошаљи задатак за штампање
 
 # Dictionaries folder (#1063)
 	Dictionaries	Речници

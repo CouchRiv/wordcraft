@@ -2545,6 +2545,24 @@ preview	Title	Esempio
 	Suggested	Suggerimenti
 	Set Proofing Language…	Imposta lingua di correzione…
 	Language Preferences…	Preferenze lingua…
+	Printer	Stampante
+	Select a printer	Seleziona una stampante
+	Refresh printers	Aggiorna stampanti
+	Two-sided printing	Stampa fronte-retro
+	Printer default	Predefinito della stampante
+	One-sided	Solo fronte
+	Two-sided: long edge	Fronte-retro: lato lungo
+	Two-sided: short edge	Fronte-retro: lato corto
+	Grayscale	Scala di grigi
+	Finding printers…	Ricerca stampanti in corso…
+	No printers found. Configure a system printer or export a PDF.	Nessuna stampante trovata. Configura una stampante di sistema oppure esporta un PDF.
+	Printer discovery failed.	Ricerca stampanti non riuscita.
+	Submitting print job…	Invio del lavoro di stampa in corso…
+	Print job submitted.	Lavoro di stampa inviato.
+	Print job submitted: {receipt}	Lavoro di stampa inviato: {receipt}
+	Print failed: the printing worker stopped.	Stampa non riuscita: il processo di stampa si è interrotto.
+	Print settings	Impostazioni di stampa
+	Submit print job	Invia lavoro di stampa
 
 # Cross-reference dialog (#1003)
 	For which item:	Per quale elemento:

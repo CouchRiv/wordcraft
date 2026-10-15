@@ -2170,6 +2170,24 @@
 	Suggested	おすすめ
 	Set Proofing Language…	校正言語の設定…
 	Language Preferences…	言語の設定…
+	Printer	プリンター
+	Select a printer	プリンターを選択
+	Refresh printers	プリンターを更新
+	Two-sided printing	両面印刷
+	Printer default	プリンターの既定値
+	One-sided	片面
+	Two-sided: long edge	両面：長辺
+	Two-sided: short edge	両面：短辺
+	Grayscale	グレースケール
+	Finding printers…	プリンターを検索しています…
+	No printers found. Configure a system printer or export a PDF.	プリンターが見つかりません。システムにプリンターを設定するか、PDF をエクスポートしてください。
+	Printer discovery failed.	プリンターの検索に失敗しました。
+	Submitting print job…	印刷ジョブを送信しています…
+	Print job submitted.	印刷ジョブを送信しました。
+	Print job submitted: {receipt}	印刷ジョブを送信しました：{receipt}
+	Print failed: the printing worker stopped.	印刷に失敗しました：印刷ワーカーが停止しました。
+	Print settings	印刷設定
+	Submit print job	印刷ジョブの送信
 
 # Dictionaries folder (#1063)
 	Dictionaries	辞書

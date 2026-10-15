@@ -2559,6 +2559,24 @@ preview	Title	Örnek
 	Suggested	Önerilenler
 	Set Proofing Language…	Yazım denetimi dilini ayarla…
 	Language Preferences…	Dil tercihleri…
+	Printer	Yazıcı
+	Select a printer	Bir yazıcı seçin
+	Refresh printers	Yazıcıları yenile
+	Two-sided printing	Çift taraflı yazdırma
+	Printer default	Yazıcı varsayılanı
+	One-sided	Tek taraflı
+	Two-sided: long edge	Çift taraflı: uzun kenar
+	Two-sided: short edge	Çift taraflı: kısa kenar
+	Grayscale	Gri tonlama
+	Finding printers…	Yazıcılar aranıyor…
+	No printers found. Configure a system printer or export a PDF.	Yazıcı bulunamadı. Sistemde bir yazıcı yapılandırın veya PDF olarak dışa aktarın.
+	Printer discovery failed.	Yazıcı arama başarısız oldu.
+	Submitting print job…	Yazdırma işi gönderiliyor…
+	Print job submitted.	Yazdırma işi gönderildi.
+	Print job submitted: {receipt}	Yazdırma işi gönderildi: {receipt}
+	Print failed: the printing worker stopped.	Yazdırma başarısız oldu: yazdırma işlemi durdu.
+	Print settings	Yazdırma ayarları
+	Submit print job	Yazdırma işini gönder
 
 # Cross-reference dialog (#1003)
 	For which item:	Hangi öğe için:

@@ -2182,6 +2182,24 @@
 	Suggested	Пропоновані
 	Set Proofing Language…	Вибрати мову перевірки правопису…
 	Language Preferences…	Мовні параметри…
+	Printer	Принтер
+	Select a printer	Виберіть принтер
+	Refresh printers	Оновити принтери
+	Two-sided printing	Двосторонній друк
+	Printer default	За замовчуванням принтера
+	One-sided	Односторонній
+	Two-sided: long edge	Двосторонній: довгий край
+	Two-sided: short edge	Двосторонній: короткий край
+	Grayscale	Відтінки сірого
+	Finding printers…	Пошук принтерів…
+	No printers found. Configure a system printer or export a PDF.	Принтерів не знайдено. Налаштуйте системний принтер або експортуйте PDF.
+	Printer discovery failed.	Не вдалося знайти принтери.
+	Submitting print job…	Надсилання завдання на друк…
+	Print job submitted.	Завдання на друк надіслано.
+	Print job submitted: {receipt}	Завдання на друк надіслано: {receipt}
+	Print failed: the printing worker stopped.	Друк не вдався: процес друку зупинився.
+	Print settings	Параметри друку
+	Submit print job	Надіслати завдання на друк
 
 # Dictionaries folder (#1063)
 	Dictionaries	Словники

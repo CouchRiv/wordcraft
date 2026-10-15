@@ -2577,6 +2577,24 @@ preview	Title	Tytuł
 	Suggested	Sugerowane
 	Set Proofing Language…	Ustaw język sprawdzania…
 	Language Preferences…	Preferencje językowe…
+	Printer	Drukarka
+	Select a printer	Wybierz drukarkę
+	Refresh printers	Odśwież drukarki
+	Two-sided printing	Drukowanie dwustronne
+	Printer default	Domyślne drukarki
+	One-sided	Jednostronne
+	Two-sided: long edge	Dwustronne: długa krawędź
+	Two-sided: short edge	Dwustronne: krótka krawędź
+	Grayscale	Odcienie szarości
+	Finding printers…	Wyszukiwanie drukarek…
+	No printers found. Configure a system printer or export a PDF.	Nie znaleziono drukarek. Skonfiguruj drukarkę systemową lub wyeksportuj PDF.
+	Printer discovery failed.	Nie udało się znaleźć drukarek.
+	Submitting print job…	Wysyłanie zadania drukowania…
+	Print job submitted.	Zadanie drukowania wysłane.
+	Print job submitted: {receipt}	Zadanie drukowania wysłane: {receipt}
+	Print failed: the printing worker stopped.	Drukowanie nie powiodło się: proces drukowania został zatrzymany.
+	Print settings	Ustawienia drukowania
+	Submit print job	Wyślij zadanie drukowania
 
 # Cross-reference dialog (#1003)
 	For which item:	Dla którego elementu:

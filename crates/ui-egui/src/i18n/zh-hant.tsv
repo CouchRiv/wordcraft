@@ -2171,6 +2171,24 @@
 	Suggested	建議
 	Set Proofing Language…	設定校訂語言…
 	Language Preferences…	語言喜好設定…
+	Printer	印表機
+	Select a printer	選取印表機
+	Refresh printers	重新整理印表機
+	Two-sided printing	雙面列印
+	Printer default	印表機預設值
+	One-sided	單面
+	Two-sided: long edge	雙面：長邊
+	Two-sided: short edge	雙面：短邊
+	Grayscale	灰階
+	Finding printers…	正在尋找印表機…
+	No printers found. Configure a system printer or export a PDF.	找不到印表機。請在系統中設定印表機或匯出 PDF。
+	Printer discovery failed.	尋找印表機失敗。
+	Submitting print job…	正在提交列印工作…
+	Print job submitted.	列印工作已提交。
+	Print job submitted: {receipt}	列印工作已提交：{receipt}
+	Print failed: the printing worker stopped.	列印失敗：列印工作執行緒已停止。
+	Print settings	列印設定
+	Submit print job	提交列印工作
 
 # Dictionaries folder (#1063)
 	Dictionaries	字典

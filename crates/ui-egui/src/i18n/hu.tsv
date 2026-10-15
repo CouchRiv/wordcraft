@@ -2558,6 +2558,24 @@
 	Set Proofing Language…	Nyelvi ellenőrzés nyelvének beállítása…
 	Language Preferences…	Nyelvi beállítások…
 	Title Bar	Címsáv
+	Printer	Nyomtató
+	Select a printer	Válasszon nyomtatót
+	Refresh printers	Nyomtatók frissítése
+	Two-sided printing	Kétoldalas nyomtatás
+	Printer default	Nyomtató alapértelmezése
+	One-sided	Egyoldalas
+	Two-sided: long edge	Kétoldalas: hosszú él
+	Two-sided: short edge	Kétoldalas: rövid él
+	Grayscale	Szürkeárnyalatos
+	Finding printers…	Nyomtatók keresése…
+	No printers found. Configure a system printer or export a PDF.	Nem található nyomtató. Állítson be egy rendszernyomtatót, vagy exportáljon PDF-et.
+	Printer discovery failed.	A nyomtatók keresése sikertelen.
+	Submitting print job…	Nyomtatási feladat küldése…
+	Print job submitted.	Nyomtatási feladat elküldve.
+	Print job submitted: {receipt}	Nyomtatási feladat elküldve: {receipt}
+	Print failed: the printing worker stopped.	A nyomtatás sikertelen: a nyomtatási folyamat leállt.
+	Print settings	Nyomtatási beállítások
+	Submit print job	Nyomtatási feladat küldése
 
 # Cross-reference dialog (#1003)
 	For which item:	Melyik elemhez:

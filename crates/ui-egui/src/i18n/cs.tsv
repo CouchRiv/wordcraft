@@ -2554,6 +2554,24 @@ preview	Title	Ukázka
 	Suggested	Navrhované
 	Set Proofing Language…	Nastavit jazyk kontroly pravopisu…
 	Language Preferences…	Předvolby jazyka…
+	Printer	Tiskárna
+	Select a printer	Vyberte tiskárnu
+	Refresh printers	Obnovit tiskárny
+	Two-sided printing	Oboustranný tisk
+	Printer default	Výchozí tiskárny
+	One-sided	Jednostranný
+	Two-sided: long edge	Oboustranný: dlouhý okraj
+	Two-sided: short edge	Oboustranný: krátký okraj
+	Grayscale	Stupně šedi
+	Finding printers…	Hledání tiskáren…
+	No printers found. Configure a system printer or export a PDF.	Nebyly nalezeny žádné tiskárny. Nastavte systémovou tiskárnu nebo exportujte PDF.
+	Printer discovery failed.	Hledání tiskáren se nezdařilo.
+	Submitting print job…	Odesílání tiskové úlohy…
+	Print job submitted.	Tisková úloha odeslána.
+	Print job submitted: {receipt}	Tisková úloha odeslána: {receipt}
+	Print failed: the printing worker stopped.	Tisk se nezdařil: proces tisku se zastavil.
+	Print settings	Nastavení tisku
+	Submit print job	Odeslat tiskovou úlohu
 
 # Cross-reference dialog (#1003)
 	For which item:	Pro kterou položku:

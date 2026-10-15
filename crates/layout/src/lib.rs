@@ -653,8 +653,8 @@ struct Ctx<'a> {
     /// The width a top-level table's percentage width is a share of, when it isn't the box's:
     /// an inherited header or footer's tables follow the section that defines it.
     pct_base: Option<f32>,
-    /// Body blocks that are empty paragraphs carrying only a section break before a continuous
-    /// section, in order: they take no room (see [`place_para`]).
+    /// Empty body paragraphs with hidden marks or continuous section breaks, in order:
+    /// they take no room (see [`place_para`]).
     quiet_marks: Vec<usize>,
     /// Whether even pages are mirrored (mirrored margins, on pages): see [`mirror_even_pages`].
     mirror: bool,
@@ -2036,6 +2036,16 @@ fn layout_pass(
         .map(|w| w[0].0)
         .filter(|end| doc.body.get(*end).and_then(|b| b.as_para()).is_some_and(|p| p.text.is_empty()))
         .collect();
+    if !opts.show_hidden {
+        ctx.quiet_marks.extend(
+            doc.body
+                .iter()
+                .enumerate()
+                .filter_map(|(i, b)| b.as_para().filter(|p| p.mark.hidden == Some(true) && p.plain_text().is_empty()).map(|_| i)),
+        );
+    }
+    ctx.quiet_marks.sort_unstable();
+    ctx.quiet_marks.dedup();
     let outline = (opts.view == ViewMode::Outline).then(|| OutlinePass::new(doc, opts.outline.clone().unwrap_or_default()));
     let default_sect = SectionProps::default();
     let mut web_sect;
