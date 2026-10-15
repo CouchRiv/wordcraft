@@ -385,6 +385,8 @@
 	Labels	Etiketler
 	Landscape	Yatay
 	Language	Dil
+	{language} (no dictionary)	{language} (sözlük yok)
+	No spelling dictionary for {language} is installed, so it isn't checked. WordCraft looks for the Hunspell dictionary {name} in the WORDCRAFT_DICTIONARIES folder and in the usual system locations.	{language} için yüklü bir yazım sözlüğü yok, bu yüzden denetlenmiyor. WordCraft, {name} Hunspell sözlüğünü WORDCRAFT_DICTIONARIES klasöründe ve olağan sistem konumlarında arar.
 	Lasso	Kement
 	Last Column	Son Sütun
 	Last commit	Son commit
@@ -2578,3 +2580,10 @@ preview	Title	Örnek
 
 # Ask Agent
 	Ask\nAgent	Ajana\nsor
+# Page Setup › Mirror margins (#1239)
+	Mirror margins	Yansıtılmış kenar boşlukları
+
+# Insert Hyperlink › Place in This Document (#1370)
+	Existing File or Web Page	Varolan Dosya veya Web Sayfası
+	Link to:	Bağlantı:
+	Place in This Document	Bu Belgede Bir Yer

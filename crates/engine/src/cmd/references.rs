@@ -37,7 +37,8 @@ pub fn specs() -> Vec<CommandSpec> {
             .key("Mod+Alt+F")
             .params(r#"{"text"?: string, "mark"?: string (a custom mark instead of the number)}"#),
         CommandSpec::new("references.endnote", "Insert Endnote", "References › Footnotes", |s, v| note(s, v, NoteKind::Endnote))
-            .key("Mod+Alt+D")
+            // macOS takes ⌘⌥D to show and hide the Dock; Word for Mac uses ⌘⌥E.
+            .key(super::mac_or("Mod+Alt+E", "Mod+Alt+D"))
             .params(r#"{"text"?: string, "mark"?: string (a custom mark instead of the number)}"#),
         CommandSpec::new("references.convertNotes", "Convert Notes", "References › Footnotes", |s, v| {
             let (foot, end) = match p::req_str(v, "to")? {
@@ -223,6 +224,13 @@ struct TocEntry {
     level: u8,
     text: String,
     lead: usize,
+}
+
+/// The headings of the body, in document order, as (body block, level 1–9, text, leading page
+/// breaks): what Insert › Link › Place in This Document lists.
+pub(crate) fn headings(s: &Session) -> Vec<(usize, u8, String, usize)> {
+    let f = FieldCode::parse("TOC \\o \"1-9\" \\u");
+    toc_entries(s, &f).into_iter().map(|e| (e.path.last(), e.level.saturating_add(1), e.text, e.lead)).collect()
 }
 
 /// The heading level (1–9) of a built-in heading style.
@@ -430,7 +438,7 @@ fn insert_toc(s: &mut Session, v: &Value) -> CmdResult {
 
 /// A hidden `_Toc` bookmark around the heading at body block `i` (after its leading page breaks),
 /// reusing one already there; its name.
-fn toc_bookmark(s: &mut Session, i: usize, lead: usize) -> Result<String, CmdError> {
+pub(crate) fn toc_bookmark(s: &mut Session, i: usize, lead: usize) -> Result<String, CmdError> {
     const MARK: usize = wordcraft_doc::para::OBJ.len_utf8();
     let para = s.doc.para(StoryRef::Body, &Path::top(i)).ok_or_else(|| CmdError::Failed("heading is gone".into()))?;
     if let Some(InlineObject::BookmarkStart { name }) = para.object_at(lead)
@@ -540,7 +548,7 @@ fn note(s: &mut Session, v: &Value, kind: NoteKind) -> CmdResult {
         NoteKind::Endnote => (PartKind::Endnote, "EndnoteText", "EndnoteReference"),
     };
     let mut para = Paragraph::new().styled(style);
-    let id = s.doc.add_part(pk, Vec::new());
+    let id = s.doc.try_add_part(pk, Vec::new())?;
     para.insert_object(
         0,
         InlineObject::NoteRef { kind, id, custom: custom.clone() },

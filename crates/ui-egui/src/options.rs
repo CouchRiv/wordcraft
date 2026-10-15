@@ -51,6 +51,9 @@ pub(crate) fn sync(app: &WordApp) {
 /// centimetre field).
 pub trait MeasureExt {
     fn measure(self, unit: Unit) -> Self;
+    /// The same field showing nothing, not even the unit, until a length is typed in: a value
+    /// the selected paragraphs differ in.
+    fn measure_blank(self, unit: Unit) -> Self;
 }
 
 impl MeasureExt for egui::DragValue<'_> {
@@ -61,11 +64,17 @@ impl MeasureExt for egui::DragValue<'_> {
                 let s = egui::emath::format_with_decimals_in_range(n, decimals);
                 if sep == '.' { s } else { s.replace('.', &sep.to_string()) }
             })
-            .custom_parser(move |text| {
-                let text: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-                wordcraft_geom::parse_measure(&text, unit).map(|pt| f64::from(pt / unit.pt_per_unit()))
-            })
+            .custom_parser(move |text| parse_length(text, unit))
     }
+    fn measure_blank(self, unit: Unit) -> Self {
+        self.custom_formatter(|_, _| String::new()).custom_parser(move |text| parse_length(text, unit))
+    }
+}
+
+/// A length typed in a field, in `unit`s.
+fn parse_length(text: &str, unit: Unit) -> Option<f64> {
+    let text: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    wordcraft_geom::parse_measure(&text, unit).map(|pt| f64::from(pt / unit.pt_per_unit()))
 }
 
 /// Regions offered in File › Options › Advanced › Region (any locale tag works through

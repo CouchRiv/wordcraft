@@ -635,6 +635,11 @@ fn caret_lang_tag(app: &WordApp) -> Option<String> {
     s.doc.styles.resolve_char(style.as_deref(), &s.typing_props()).lang
 }
 
+/// The Hunspell dictionary the caret's language needs but doesn't have (`pl_PL`), if any (#1167).
+pub(crate) fn caret_missing_dictionary(app: &WordApp) -> Option<&'static str> {
+    wordcraft_engine::proof::missing_dictionary(caret_lang_tag(app).as_deref())
+}
+
 /// Review › Language (and the status bar's language): set the selection's proofing language, or
 /// leave it unchecked. The current choice has a check mark; a language outside the short list
 /// (French, German…) shows checked above it. Set Proofing Language… opens the Language dialog
@@ -1354,7 +1359,9 @@ fn margins_items(ui: &mut Ui, app: &mut WordApp) {
         ("Mirrored", "mirrored"),
         ("Office 2003 Default", "office2003"),
     ] {
-        mi_check(ui, app, l, current == Some(k), "layout.margins", json!({"preset": k}));
+        // Mirrored margins come from the document as well as from the preset (#1181).
+        let on = current == Some(k) || (k == "mirrored" && app.session.doc.settings.mirror_margins);
+        mi_check(ui, app, l, on, "layout.margins", json!({"preset": k}));
     }
     mi(ui, app, "Custom Margins…", "ui.dialog", json!({"name": "pageSetup"}));
 }
@@ -2380,6 +2387,8 @@ fn picture_format(app: &mut WordApp, ui: &mut Ui) {
             });
             ui.add_space(2.0);
             crate::widgets::row(ui, |ui| {
+                let cropping = crate::crop::active(app).is_some();
+                small(ui, app, "crop", Some("Crop"), "Crop", "ui.crop", json!({}), cropping);
                 for (i, side) in ["L", "T", "R", "B"].iter().enumerate() {
                     ui.label(egui::RichText::new(tl!(side)).small());
                     let mut v = crop0[i] * 100.0;

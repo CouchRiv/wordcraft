@@ -289,6 +289,8 @@ pub enum ShapeKind {
     RoundedRectangle,
     Ellipse,
     Triangle,
+    /// A right triangle (DrawingML's `rtTriangle`): the right angle at the bottom left.
+    RightTriangle,
     Diamond,
     Line,
     Arrow,
@@ -1033,32 +1035,32 @@ impl Paragraph {
 
     /// Merge adjacent equal runs and drop empty ones.
     pub fn normalize(&mut self) {
+        // Runs must end on character boundaries and cover the text exactly (never expected, but
+        // files lie): clamp each end to the text, push it past a split character, pad the tail.
+        let n = self.text.len();
+        let mut end = 0usize;
         let mut out: Vec<Run> = Vec::with_capacity(self.runs.len());
         for r in self.runs.drain(..) {
-            if r.len == 0 {
+            let mut e = end.saturating_add(r.len).min(n);
+            while !self.text.is_char_boundary(e) {
+                e += 1;
+            }
+            if e == end {
                 continue;
             }
             match out.last_mut() {
-                Some(l) if l.props == r.props => l.len += r.len,
-                _ => out.push(r),
+                Some(l) if l.props == r.props => l.len += e - end,
+                _ => out.push(Run { len: e - end, props: r.props }),
+            }
+            end = e;
+        }
+        if end < n {
+            match out.last_mut() {
+                Some(l) => l.len += n - end,
+                None => out.push(Run { len: n, props: self.mark.clone() }),
             }
         }
         self.runs = out;
-        // Repair a run list that doesn't cover the text exactly (never expected, but files lie).
-        let total: usize = self.runs.iter().map(|r| r.len).sum();
-        if total != self.text.len() {
-            if total < self.text.len() {
-                let p = self.runs.last().map(|r| r.props.clone()).unwrap_or_else(|| self.mark.clone());
-                self.runs.push(Run { len: self.text.len() - total, props: p });
-            } else {
-                let mut keep = self.text.len();
-                for r in &mut self.runs {
-                    r.len = r.len.min(keep);
-                    keep -= r.len;
-                }
-                self.runs.retain(|r| r.len > 0);
-            }
-        }
     }
 
     /// Delete `a..b` (bytes). Objects inside are removed.

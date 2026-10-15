@@ -525,6 +525,8 @@
 	Labels	标签
 	Landscape	横向
 	Language	语言
+	{language} (no dictionary)	{language}（无词典）
+	No spelling dictionary for {language} is installed, so it isn't checked. WordCraft looks for the Hunspell dictionary {name} in the WORDCRAFT_DICTIONARIES folder and in the usual system locations.	未安装{language}的拼写词典，因此不会检查该语言。WordCraft 会在 WORDCRAFT_DICTIONARIES 文件夹和常见的系统位置查找 Hunspell 词典 {name}。
 	Lasso	套索
 	Last Column	最后一列
 	Last commit	最近提交
@@ -2194,3 +2196,10 @@
 
 # Ask Agent
 	Ask\nAgent	询问\n代理
+# Page Setup › Mirror margins (#1239)
+	Mirror margins	对称页边距
+
+# Insert Hyperlink › Place in This Document (#1370)
+	Existing File or Web Page	现有文件或网页
+	Link to:	链接到:
+	Place in This Document	本文档中的位置

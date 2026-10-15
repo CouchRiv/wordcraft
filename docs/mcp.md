@@ -95,6 +95,9 @@ files it was given rather than guarding against other software on the computer.
 | `screenshot`, `click`, `key`, `ui_inspect` | app only (`--connect`) |
 | `wait_for_request`, `reply_to_request` | Ask Agent, app only (`--connect`): see [Ask Agent](#ask-agent) |
 
+`insert.picture` and `insert.icon` leave the caret after the new picture, so typing next doesn't
+replace it; Picture Format commands (`picture.*`, `arrange.*`) still act on it.
+
 Resources: `wordcraft://document` (inspect) and `wordcraft://commands`.
 
 ## Ask Agent
@@ -228,3 +231,8 @@ bridge connection; sharing a display name does not grant another client ownershi
 After an ambiguous transport failure, reconnect and inspect instead of replaying edits.
 Review decisions are native human controls. The application calls no model and stores no
 model credential. Requests and drafts are kept for the current application session only.
+
+`para.set` also takes `"onPage": {"align"?: "left|center|right|justify|distribute", "left"?: pt,
+"right"?: pt}`: the alignment and indents as seen on the page, which each selected paragraph turns
+into its own start and end once `props` (a `bidi` in it, say) is applied. The Paragraph dialog sends
+only the fields that changed this way, as one command and so one undo step.

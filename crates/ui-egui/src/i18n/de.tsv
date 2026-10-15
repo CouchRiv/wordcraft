@@ -456,6 +456,8 @@
 	Labels	Etiketten
 	Landscape	Querformat
 	Language	Sprache
+	{language} (no dictionary)	{language} (kein Wörterbuch)
+	No spelling dictionary for {language} is installed, so it isn't checked. WordCraft looks for the Hunspell dictionary {name} in the WORDCRAFT_DICTIONARIES folder and in the usual system locations.	Für {language} ist kein Rechtschreibwörterbuch installiert, daher wird die Sprache nicht geprüft. WordCraft sucht das Hunspell-Wörterbuch {name} im Ordner WORDCRAFT_DICTIONARIES und an den üblichen Systemorten.
 	Lasso	Lasso
 	Last Column	Letzte Spalte
 	Last commit	Letzter Commit
@@ -2181,3 +2183,10 @@
 
 # Ask Agent
 	Ask\nAgent	Agent\nfragen
+# Page Setup › Mirror margins (#1239)
+	Mirror margins	Gegenüberliegende Seiten
+
+# Insert Hyperlink › Place in This Document (#1370)
+	Existing File or Web Page	Datei oder Webseite
+	Link to:	Link zu:
+	Place in This Document	Aktuelles Dokument

@@ -71,6 +71,27 @@ pub enum DocError {
 
 pub type Result<T> = std::result::Result<T, DocError>;
 
+/// A free id, `min` or more, for something new (a part, a list, a comment): one past `largest`, the
+/// largest id in use, so ids keep growing; once that would pass `u32::MAX` (a file can use any id),
+/// the lowest one `used` (every id in use) doesn't hold. `None` when every id from `min` up is taken.
+pub fn free_id(largest: Option<u32>, used: impl Iterator<Item = u32>, min: u32) -> Option<u32> {
+    let Some(largest) = largest else { return Some(min) };
+    if let Some(next) = largest.checked_add(1) {
+        return Some(next.max(min));
+    }
+    let mut ids: Vec<u32> = used.filter(|&i| i >= min).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut want = min;
+    for i in ids {
+        if i > want {
+            break;
+        }
+        want = want.checked_add(1)?;
+    }
+    Some(want)
+}
+
 /// A block in a story. (Blocks are always behind an `Arc`, so the size difference is fine.)
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -473,6 +494,14 @@ pub struct Settings {
     /// 2013 and later, which places a table's border at the margin rather than its text and lets
     /// justified lines shrink their spaces to fit more text.
     pub compat_mode: u32,
+    /// Fonts the document's font table classes as roman (serif, `w:family w:val="roman"`): Word
+    /// draws one that isn't installed in a serif face.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roman_fonts: Vec<String>,
+    /// `w:doNotUseHTMLParagraphAutoSpacing`: the space between two paragraphs is the first's space
+    /// after plus the second's space before, not the larger of the two.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sum_paragraph_spacing: bool,
     /// Keep contextual paragraph spacing inside legacy table cells (`allowSpaceOfSameStyleInTable`).
     /// Word ignores the layout override in compatibility mode 15, but the flag still round-trips.
     pub allow_space_of_same_style_in_table: bool,
@@ -607,6 +636,8 @@ impl Default for Settings {
             protect_formatting: false,
             protect_hash: Vec::new(),
             compat_mode: COMPAT_MODE_CURRENT,
+            roman_fonts: Vec::new(),
+            sum_paragraph_spacing: false,
             allow_space_of_same_style_in_table: false,
             grid_h: DEFAULT_GRID,
             grid_v: DEFAULT_GRID,
@@ -942,15 +973,22 @@ impl Document {
         &mut self.last_section
     }
 
-    /// Allocate a new part id and insert the part.
+    /// Allocate a new part id and insert the part. Part ids run out only past `u32::MAX` parts, more
+    /// than memory holds; then nothing is added and the id is 0, which [`free_id`] never gives a part.
     pub fn add_part(&mut self, kind: PartKind, blocks: Blocks) -> u32 {
-        let id = self.parts.keys().next_back().map(|k| k + 1).unwrap_or(1);
+        self.try_add_part(kind, blocks).unwrap_or(0)
+    }
+
+    /// [`Document::add_part`], or an error, adding nothing, when every part id is taken.
+    pub fn try_add_part(&mut self, kind: PartKind, blocks: Blocks) -> Result<u32> {
+        let id = free_id(self.parts.keys().next_back().copied(), self.parts.keys().copied(), 1)
+            .ok_or_else(|| DocError::Invalid("no free part id".into()))?;
         let mut part = Part { kind, blocks, body: TextBody::default() };
         if part.blocks.is_empty() {
             part.blocks.push(para_block(Paragraph::new()));
         }
         self.parts.insert(id, part);
-        id
+        Ok(id)
     }
 
     /// Count words like Word's status bar (whitespace-separated tokens containing a letter or digit,
@@ -1203,6 +1241,18 @@ impl Document {
                         }
                     });
                 }
+            }
+        }
+    }
+
+    /// Repair every paragraph's runs (see [`Paragraph::normalize`]); for models from untrusted
+    /// JSON, whose run lengths may overflow, fall short or split a character.
+    pub fn normalize_runs(&mut self) {
+        let mut stories: Vec<&mut Blocks> = vec![&mut self.body];
+        stories.extend(self.parts.values_mut().map(|p| &mut p.blocks));
+        for blocks in stories {
+            for b in blocks.iter_mut() {
+                edit::each_para_mut(Arc::make_mut(b), 0, &mut Paragraph::normalize);
             }
         }
     }

@@ -119,12 +119,24 @@ fn word_default_shortcuts_resolve() {
     assert_eq!(id(cmd::mac_or("Ctrl+Shift+D", "Alt+Shift+D")), Some("insert.dateField"));
     if cfg!(target_os = "macos") {
         assert_eq!(id("Mod+Shift+G"), Some("edit.findPrevious"));
+        // Word for Mac's own keys: ⌘⇧S Save As, ⌘⌥E endnote (⌘⌥D hides the Dock), ⌘⌥A comment, ⌃H Replace.
+        assert_eq!(id("Mod+Shift+S"), Some("file.saveAs"));
+        assert_eq!(id("Mod+Alt+E"), Some("references.endnote"));
+        assert_eq!(id("Mod+Alt+D"), None);
+        assert_eq!(id("Mod+Alt+A"), Some("review.newComment"));
+        assert_eq!(id("Ctrl+H"), Some("edit.findReplace"));
     } else {
+        assert_eq!(id("Mod+Shift+S"), Some("styles.apply"));
+        assert_eq!(id("Mod+Alt+D"), Some("references.endnote"));
+        assert_eq!(id("Mod+Alt+A"), None);
         assert_eq!(id("Mod+Shift+G"), Some("review.wordCount"));
         assert_eq!(id("Mod+Alt+C"), Some("text.copyright"));
         assert_eq!(id("Mod+Alt+H"), Some("format.highlight"));
     }
     assert_eq!(id("Mod+PageUp"), Some("edit.findPrevious"));
+    assert_eq!(id("F12"), Some("file.saveAs"));
+    assert_eq!(id("Mod+Alt+M"), Some("review.newComment"));
+    assert_eq!(id("Mod+H"), Some("edit.findReplace"));
 }
 
 #[test]
@@ -1625,6 +1637,15 @@ fn page_setup_and_breaks() {
     assert_eq!(s.doc.sections().len(), 2);
     assert_eq!(s.layout().pages.len(), 2);
     assert!(s.run("layout.margins", &json!({"left": 1000.0})).is_err());
+    // Mirrored margins: from the preset or `mirror` (#1181); plain numbers keep the setting.
+    run(&mut s, "layout.margins", json!({"preset": "mirrored"}));
+    assert!(s.doc.settings.mirror_margins);
+    run(&mut s, "layout.margins", json!({"left": 80.0}));
+    assert!(s.doc.settings.mirror_margins);
+    run(&mut s, "layout.margins", json!({"left": 80.0, "mirror": false}));
+    assert!(!s.doc.settings.mirror_margins && s.doc.last_section.margin_left == 80.0);
+    run(&mut s, "layout.margins", json!({"mirror": true}));
+    assert!(s.doc.settings.mirror_margins);
 }
 
 /// #1433: a custom page size (More Paper Sizes…) sets the section in its orientation, and
@@ -2068,6 +2089,40 @@ fn track_changes_and_set_author_list_their_params() {
 }
 
 #[test]
+fn line_and_page_break_toggles_take_an_explicit_value() {
+    // #967: a script sets keep with next on a heading and clears it on the paragraph after,
+    // which inherits it through Enter, without tracking the toggle state.
+    let reg = cmd::registry();
+    type Field = fn(&wordcraft_doc::ParaProps) -> Option<bool>;
+    let cases: [(&str, Field); 4] = [
+        ("para.keepNext", |p| p.keep_next),
+        ("para.keepLines", |p| p.keep_lines),
+        ("para.pageBreakBefore", |p| p.page_break_before),
+        ("para.widowControl", |p| p.widow_control),
+    ];
+    for (id, field) in cases {
+        assert!(reg.get(id).unwrap().params.contains(r#""value"?: bool"#), "{id} lists its param");
+        let mut s = s();
+        run(&mut s, "text.insert", json!({"text": "Heading"}));
+        let at = |s: &Session, block| s.doc.para_at(&Pos::body(block, 0)).and_then(|p| field(&p.props));
+        for value in [true, true, false, false, true] {
+            run(&mut s, id, json!({"value": value}));
+            assert_eq!(at(&s, 0), Some(value), "{id} value {value} sets, never toggles");
+        }
+        run(&mut s, "text.newParagraph", json!({}));
+        assert_eq!(at(&s, 1), Some(true), "{id} carries over to the new paragraph");
+        run(&mut s, id, json!({"value": false}));
+        assert_eq!((at(&s, 0), at(&s, 1)), (Some(true), Some(false)), "{id} clears only the new paragraph");
+        run(&mut s, id, json!({}));
+        assert_eq!(at(&s, 1), Some(true), "{id} without value toggles");
+        run(&mut s, id, json!({}));
+        assert_eq!(at(&s, 1), Some(false), "{id} without value toggles back");
+        run(&mut s, id, json!({"value": "yes"}));
+        assert_eq!(at(&s, 1), Some(true), "{id} ignores a value that isn't a bool and toggles, as format.bold does");
+    }
+}
+
+#[test]
 fn no_markup_view_lays_out_the_final_text() {
     let mut s = s();
     run(&mut s, "text.insert", json!({"text": "original"}));
@@ -2424,6 +2479,41 @@ fn text_box_insert_puts_the_caret_inside() {
 }
 
 #[test]
+fn commands_after_the_largest_ids_take_free_ones() {
+    // A file can carry any ids, 0 and u32::MAX included: comments, notes, boxes and lists the
+    // commands add take free ids, without overflowing or replacing what has the id they wrap to.
+    let mut s = s();
+    run(&mut s, "text.insert", json!({"text": "Some words here"}));
+    for id in [0, u32::MAX] {
+        let blocks = vec![wordcraft_doc::para_block(wordcraft_doc::Paragraph::new())];
+        s.doc.parts.insert(id, wordcraft_doc::Part { kind: wordcraft_doc::PartKind::Comment, blocks, ..Default::default() });
+        s.doc.comments.insert(id, wordcraft_doc::Comment { part: id, ..Default::default() });
+    }
+    s.doc.numbering.add_list(wordcraft_doc::ListKind::Bullet);
+    s.doc.numbering.abstracts[0].id = u32::MAX;
+    s.doc.numbering.nums[0].id = u32::MAX;
+    s.doc.numbering.nums[0].abstract_id = u32::MAX;
+    let before = s.doc.clone();
+    assert_eq!(run(&mut s, "review.newComment", json!({"text": "new"})), json!({"id": 1, "story": 1}));
+    assert_eq!(run(&mut s, "review.reply", json!({"id": 0, "text": "re"})), json!({"id": 2}));
+    run(&mut s, "para.numbering", json!({}));
+    assert_eq!(run(&mut s, "list.define", json!({"levels": []}))["num"], 2);
+    assert_eq!(run(&mut s, "references.footnote", json!({"text": "note"}))["id"], 3);
+    for id in ["insert.wordArt", "insert.textBox"] {
+        run(&mut s, "caret.set", json!({"pos": Pos::body(0, 0)}));
+        run(&mut s, id, json!({"text": "Box"}));
+    }
+    assert_eq!((s.doc.parts.len(), s.doc.comments.len()), (before.parts.len() + 5, 4));
+    assert!(before.parts.iter().all(|(k, p)| s.doc.parts.get(k) == Some(p)));
+    assert!(before.comments.iter().all(|(k, c)| s.doc.comments.get(k) == Some(c)));
+    let n = &s.doc.numbering;
+    assert!(before.numbering.nums.iter().all(|x| n.nums.contains(x)) && before.numbering.abstracts.iter().all(|a| n.abstracts.contains(a)));
+    let unique = |ids: Vec<u32>| ids.iter().collect::<std::collections::HashSet<_>>().len() == ids.len();
+    assert!(unique(n.nums.iter().map(|x| x.id).collect()) && unique(n.abstracts.iter().map(|a| a.id).collect()), "{n:?}");
+    assert_eq!(n.nums.len(), 3);
+}
+
+#[test]
 fn text_box_in_a_table_cell_shows_its_text() {
     let mut s = s();
     run(&mut s, "insert.table", json!({"rows": 1, "cols": 1}));
@@ -2674,6 +2764,50 @@ fn deleted_text_box_takes_its_text_with_it_until_undo() {
     let (_, part) = s.doc.parts.iter().next().unwrap();
     assert_eq!(part.kind, wordcraft_doc::PartKind::TextBox);
     assert_eq!(s.doc.word_count_including_notes(), 2);
+}
+
+#[test]
+fn text_box_in_a_table_nested_seventeen_deep_survives_an_edit_and_a_save() {
+    // #1339: opened from a .docx, a box shown only from a table nested deeper than 16 was taken
+    // for unshown, so the next unrelated edit pruned its story and saving dropped its text.
+    use wordcraft_doc::{Block, Document, InlineObject, Paragraph, PartKind, Path, Table, para_block};
+    let mut d = Document::from_text("Intro");
+    let id = d.add_part(PartKind::TextBox, vec![para_block(Paragraph::with_text("Deep box", Default::default()))]);
+    let shape = InlineObject::Shape {
+        kind: wordcraft_doc::para::ShapeKind::TextBox,
+        w: 72.0,
+        h: 36.0,
+        fill: None,
+        stroke: None,
+        stroke_width: 0.75,
+        float: Default::default(),
+        story: Some(id),
+        freeform: None,
+        effects: Default::default(),
+        extra: Default::default(),
+    };
+    let mut p = Paragraph::with_text("Cell", Default::default());
+    p.insert_object(0, shape, &Default::default()).unwrap();
+    d.body.extend((0..17).fold(vec![para_block(p)], |inner, _| {
+        let mut t = Table::new(1, 1, 300.0);
+        t.rows[0].cells[0].blocks = inner;
+        vec![std::sync::Arc::new(Block::Table(t))]
+    }));
+    // The innermost cell's paragraph: the table after "Intro", then row, cell and block 0 down.
+    let path = Path([vec![1], vec![0; 17 * 3]].concat());
+    let deep_box = |doc: &Document| {
+        let id = doc.para(StoryRef::Body, &path)?.objects.iter().find_map(InlineObject::text_box)?;
+        doc.parts.get(&id).filter(|p| p.kind == PartKind::TextBox).map(|_| doc.plain_text(StoryRef::Part(id)))
+    };
+    let mut s = Session::new(wordcraft_docx::read(&wordcraft_docx::write(&d).unwrap()).unwrap());
+    assert_eq!(deep_box(&s.doc).as_deref(), Some("Deep box"), "opened");
+    let unshown = s.doc.add_part(PartKind::TextBox, vec![para_block(Paragraph::with_text("Shown nowhere", Default::default()))]);
+    run(&mut s, "text.insert", json!({"text": "Edited. "}));
+    assert_eq!(deep_box(&s.doc).as_deref(), Some("Deep box"), "kept through the edit");
+    assert!(!s.doc.parts.contains_key(&unshown), "a box shown nowhere still goes");
+    let back = wordcraft_docx::read(&wordcraft_docx::write(&s.doc).unwrap()).unwrap();
+    assert_eq!(deep_box(&back).as_deref(), Some("Deep box"), "saved");
+    assert!(back.plain_text(StoryRef::Body).starts_with("Edited. Intro"));
 }
 
 #[test]
@@ -4490,6 +4624,41 @@ fn unknown_text_extensions_open_as_text() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// #1384: File Explorer's New › Microsoft Word Document makes an empty, zero-byte .docx. It opens
+/// as a new blank document on the Normal template, and Save writes it back to that file instead
+/// of asking for a name.
+#[test]
+fn an_empty_file_opens_as_a_blank_document_saved_back_to_it() {
+    let dir = std::env::temp_dir().join(format!("wordcraft-1384-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("New Microsoft Word Document.docx");
+    std::fs::write(&path, b"").unwrap();
+    let mut s = s();
+    run(&mut s, "file.options", json!({"region": "it-IT"}));
+    s.set_editing_language(Some("it-IT"));
+    run(&mut s, "text.insert", json!({"text": "An untitled draft"}));
+    let r = run(&mut s, "file.open", json!({"path": path.to_string_lossy()}));
+    assert_eq!((r["paragraphs"].as_u64(), r["words"].as_u64()), (Some(1), Some(0)), "{r}");
+    assert_eq!(text(&s), "");
+    assert_eq!(s.path.as_deref(), Some(path.as_path()));
+    assert!(!s.dirty);
+    let sp = &s.doc.last_section;
+    assert_eq!((sp.page_w, sp.page_h), (595.28, 841.89), "the region's paper, as File › New gives");
+    assert_eq!(s.doc.styles.default_chr.lang.as_deref(), Some("it-IT"), "in the editing language");
+
+    run(&mut s, "text.insert", json!({"text": "Ciao"}));
+    let r = run(&mut s, "file.save", json!({}));
+    assert_eq!(r["saved"], true, "{r}");
+    assert!(!s.ui_requests.iter().any(|q| q["open"] == "saveAs"), "no Save As");
+    let saved = crate::io::open_path(&path).unwrap();
+    assert_eq!(saved.plain_text(StoryRef::Body), "Ciao");
+
+    // The same from the browser's picker (the web), which hands over the bytes.
+    run(&mut s, "file.open", json!({"path": "Vuoto.docx", "data": ""}));
+    assert_eq!((text(&s), s.doc.last_section.page_w), (String::new(), 595.28));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// #549: after a double-click, dragging extends the selection by whole words; after a
 /// triple-click by whole paragraphs; after Ctrl/⌘+click by whole sentences. Forward drags keep
 /// the first unit's start as the anchor, backward drags its end.
@@ -4700,6 +4869,34 @@ fn table_from(text: &str) -> Session {
 fn table_texts(s: &Session) -> Vec<Vec<String>> {
     let t = s.doc.body.iter().find_map(|b| b.as_table()).expect("a table");
     t.rows.iter().map(|r| r.cells.iter().map(|c| c.blocks.iter().filter_map(|b| b.as_para()).map(|p| p.text.clone()).collect()).collect()).collect()
+}
+
+#[test]
+fn convert_text_to_table_refuses_to_drop_content() {
+    // Issue #1318: a 64th field and a table between the selected paragraphs were silently lost.
+    {
+        let wide = (0..64).map(|i| i.to_string()).collect::<Vec<_>>().join("\t");
+        let mut s = s();
+        run(&mut s, "document.setText", json!({"text": wide}));
+        run(&mut s, "select.all", json!({}));
+        let depth = s.undo_depth();
+        assert!(s.run("table.fromText", &json!({})).is_err());
+        assert_eq!(s.doc.body.len(), 1);
+        assert!(s.doc.body.iter().all(|b| b.as_table().is_none()));
+        assert_eq!(s.undo_depth(), depth);
+    }
+    let mut s = s();
+    run(&mut s, "document.setText", json!({"text": "x\ny\nz"}));
+    let at = |i: u32| json!({"story": "body", "path": [i], "off": 0});
+    run(&mut s, "select.range", json!({"anchor": at(1), "focus": at(1)}));
+    run(&mut s, "table.fromText", json!({}));
+    assert!(s.doc.body.get(1).and_then(|b| b.as_table()).is_some());
+    run(&mut s, "select.range", json!({"anchor": at(0), "focus": at(2)}));
+    let depth = s.undo_depth();
+    assert!(s.run("table.fromText", &json!({})).is_err());
+    assert_eq!(s.doc.body.len(), 3);
+    assert!(s.doc.body.get(1).and_then(|b| b.as_table()).is_some());
+    assert_eq!(s.undo_depth(), depth);
 }
 
 #[test]
@@ -5748,6 +5945,106 @@ fn connected_control_cannot_accept_through_nested_macro() {
     assert!(result.unwrap_err().to_string().contains("HUMAN_REVIEW_REQUIRED"));
 }
 
+#[test]
+fn json_open_repairs_hostile_run_lengths() {
+    use wordcraft_doc::{Block, Document};
+    // "héllo": é is two bytes (1..3); a run ending at 2 splits it, usize::MAX overflows a sum.
+    for lens in [vec![2, 4], vec![usize::MAX, usize::MAX], vec![1], vec![], vec![0, 99]] {
+        let mut d = Document::from_text("héllo");
+        if let Some(Block::Para(p)) = d.body.first_mut().map(std::sync::Arc::make_mut) {
+            p.runs = lens.iter().map(|&len| wordcraft_doc::para::Run { len, props: Default::default() }).collect();
+        }
+        let bytes = serde_json::to_vec(&d).unwrap();
+        let (doc, _) = crate::io::open_bytes_with("x.json", &bytes, None).unwrap();
+        let Some(Block::Para(p)) = doc.body.first().map(|b| &**b) else { panic!("no paragraph") };
+        let mut end = 0;
+        for (r, _) in p.run_ranges() {
+            assert!(p.text.is_char_boundary(r.end) && r.end > r.start, "{lens:?}");
+            end = r.end;
+        }
+        assert_eq!(end, p.text.len(), "{lens:?}");
+    }
+}
+
+#[test]
+fn outline_aliases_add_one_undo_step() {
+    let mut s = s();
+    run(&mut s, "text.insert", json!({"text": "one"}));
+    run(&mut s, "text.newParagraph", json!({}));
+    run(&mut s, "text.insert", json!({"text": "two"}));
+    for id in ["outline.promote", "outline.demote", "outline.moveUp", "outline.moveDown"] {
+        let (doc, sel, depth) = (s.doc.clone(), s.sel.clone(), s.undo_depth());
+        run(&mut s, id, json!({}));
+        assert_ne!(s.doc, doc, "{id} changed nothing");
+        assert_eq!(s.undo_depth(), depth + 1, "{id}");
+        run(&mut s, "edit.undo", json!({}));
+        assert_eq!(s.doc, doc, "{id}: one undo restores the document");
+        assert_eq!(s.sel, sel, "{id}: one undo restores the selection");
+        run(&mut s, "edit.redo", json!({}));
+    }
+}
+
+/// Insert › Link › Place in This Document (#1234): a link to a bookmark, a heading or the top of
+/// the document, the list of those places, and following the link.
+#[test]
+fn links_to_places_in_this_document() {
+    let mut s = s();
+    run(&mut s, "text.insert", json!({"text": "Intro"}));
+    run(&mut s, "para.style", json!({"style": "Heading1"}));
+    run(&mut s, "text.newParagraph", json!({}));
+    run(&mut s, "para.style", json!({"style": "Normal"}));
+    run(&mut s, "text.insert", json!({"text": "Body text here"}));
+    run(&mut s, "text.newParagraph", json!({}));
+    run(&mut s, "text.insert", json!({"text": "Details"}));
+    run(&mut s, "para.style", json!({"style": "Heading2"}));
+    run(&mut s, "select.text", json!({"text": "Body"}));
+    run(&mut s, "insert.bookmark", json!({"name": "Mark1"}));
+    let links = |s: &Session| -> Vec<(String, String)> {
+        s.doc
+            .body
+            .iter()
+            .filter_map(|b| b.as_para())
+            .flat_map(|p| p.run_ranges().filter_map(|(r, c)| Some((c.link.clone()?, p.text.get(r)?.to_string()))).collect::<Vec<_>>())
+            .collect()
+    };
+    // The places: the top, both headings with their levels, and the one visible bookmark.
+    let t = run(&mut s, "link.targets", json!({}));
+    assert_eq!(t["top"], true);
+    let heads: Vec<(u64, String)> =
+        t["headings"].as_array().unwrap().iter().map(|h| (h["level"].as_u64().unwrap(), h["text"].as_str().unwrap().to_string())).collect();
+    assert_eq!(heads, vec![(1, "Intro".to_string()), (2, "Details".to_string())]);
+    assert_eq!(t["bookmarks"], json!(["Mark1"]));
+    // A bookmark link on the selection.
+    run(&mut s, "select.text", json!({"text": "here"}));
+    run(&mut s, "insert.link", json!({"bookmark": "Mark1"}));
+    assert_eq!(links(&s), vec![("#Mark1".to_string(), "here".to_string())]);
+    // A heading link at a caret inserts the heading's text; it reuses the heading's hidden bookmark.
+    run(&mut s, "caret.set", json!({"pos": {"block": 1, "off": 0}}));
+    run(&mut s, "insert.link", json!({"heading": t["headings"][1]["block"]}));
+    let l = links(&s);
+    assert_eq!(l.len(), 2, "{l:?}");
+    let (hidden, shown) = l.iter().find(|(a, _)| a.starts_with("#_Toc")).cloned().unwrap();
+    assert_eq!(shown, "Details", "{l:?}");
+    let t2 = run(&mut s, "link.targets", json!({}));
+    assert_eq!(t2["bookmarks"], json!(["Mark1"]), "the hidden bookmark is not listed");
+    run(&mut s, "caret.set", json!({"pos": {"block": 1, "off": 0}}));
+    run(&mut s, "insert.link", json!({"heading": t["headings"][1]["block"], "text": "again"}));
+    assert!(links(&s).iter().all(|(a, _)| a == "#Mark1" || *a == hidden), "one bookmark for the heading: {:?}", links(&s));
+    // The top of the document, and following the links.
+    run(&mut s, "caret.set", json!({"pos": {"block": 1, "off": 0}}));
+    run(&mut s, "insert.link", json!({"top": true}));
+    assert!(links(&s).iter().any(|(a, t)| a == "#_top" && t == "Top of the Document"), "{:?}", links(&s));
+    run(&mut s, "edit.goto", json!({"bookmark": "Mark1"}));
+    assert_ne!(s.sel.focus, Pos::body(0, 0));
+    run(&mut s, "edit.goto", json!({"bookmark": "_top"}));
+    assert_eq!(s.sel.focus, Pos::body(0, 0));
+    // Refusals change nothing.
+    let rev = s.rev();
+    assert!(s.run("insert.link", &json!({"bookmark": "Nope"})).is_err());
+    assert!(s.run("insert.link", &json!({"heading": 1})).is_err(), "a body paragraph is not a heading");
+    assert_eq!(s.rev(), rev);
+}
+
 /// A DOCX built in code: a tracked deletion inside a field result, as Word writes when a
 /// formula field's result is edited (#1037). The first field's result is split across the field
 /// end; the second has its whole result deleted.
@@ -6356,5 +6653,41 @@ fn odt_deleted_mark_inside_an_insertion_survives_reject_all() {
         let mut s = Session::new(d);
         run(&mut s, "review.rejectAll", json!({}));
         assert_eq!(text(&s), "One \n two");
+    }
+}
+
+/// #1320: `layout.verticalAlign` sets the section's vertical alignment, Justified included
+/// ("justify", or "both"/"justified"); a value it doesn't know is Top, as before. Section JSON
+/// for `layout.pageSetup` keeps its names.
+#[test]
+fn vertical_align_command_sets_justified() {
+    use wordcraft_doc::section::PageVAlign;
+    let mut s = s();
+    let va = |s: &Session| crate::cmd::page::sect(s).valign;
+    for (value, want) in [
+        ("justify", PageVAlign::Justify),
+        ("center", PageVAlign::Center),
+        ("both", PageVAlign::Justify),
+        ("bottom", PageVAlign::Bottom),
+        ("justified", PageVAlign::Justify),
+        ("top", PageVAlign::Top),
+        ("sideways", PageVAlign::Top),
+    ] {
+        run(&mut s, "layout.verticalAlign", json!({"value": value}));
+        assert_eq!(va(&s), want, "{value}");
+    }
+    run(&mut s, "layout.verticalAlign", json!({"value": "justify"}));
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(va(&s), PageVAlign::Top, "one Undo step");
+    let spec = s.registry.get("layout.verticalAlign").unwrap();
+    assert!(spec.params.contains("justify"), "documents its values: {}", spec.params);
+    // Section JSON: today's names still read, and Justified is "justify".
+    let mut props = serde_json::to_value(crate::cmd::page::sect(&s)).unwrap();
+    assert_eq!(props["valign"], json!("top"));
+    for (name, want) in [("center", PageVAlign::Center), ("bottom", PageVAlign::Bottom), ("justify", PageVAlign::Justify), ("top", PageVAlign::Top)] {
+        props["valign"] = json!(name);
+        run(&mut s, "layout.pageSetup", json!({"section": props.clone()}));
+        assert_eq!(va(&s), want, "{name}");
+        assert_eq!(serde_json::to_value(crate::cmd::page::sect(&s)).unwrap()["valign"], json!(name));
     }
 }

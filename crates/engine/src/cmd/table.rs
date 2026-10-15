@@ -1100,7 +1100,15 @@ fn from_text(s: &mut Session, v: &Value) -> CmdResult {
     }
     let lines: Vec<String> =
         (a.path.last()..=b.path.last()).filter_map(|i| s.doc.para(a.story, &a.path.with_last(i)).map(|p| p.plain_text())).collect();
-    let cols = lines.iter().map(|l| l.split(sep).count()).max().unwrap_or(1).clamp(1, 63);
+    // Refuse rather than drop content: a table between the paragraphs would be removed with them.
+    if lines.len() != b.path.last() - a.path.last() + 1 {
+        return Err(CmdError::Failed("select only paragraphs to convert".into()));
+    }
+    let cols = lines.iter().map(|l| l.split(sep).count()).max().unwrap_or(1);
+    // A table has at most 63 columns; a longer row would lose its last fields.
+    if cols > 63 {
+        return Err(CmdError::Failed("a table can have at most 63 columns".into()));
+    }
     let width = super::page::sect(s).text_width();
     let mut t = Table::new(lines.len().max(1), cols, width);
     for (r, l) in lines.iter().enumerate() {
