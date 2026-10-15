@@ -385,6 +385,8 @@
 	Labels	Címkék
 	Landscape	Fekvő
 	Language	Nyelv
+	{language} (no dictionary)	{language} (nincs szótár)
+	No spelling dictionary for {language} is installed, so it isn't checked. WordCraft looks for the Hunspell dictionary {name} in the WORDCRAFT_DICTIONARIES folder and in the usual system locations.	A(z) {language} nyelvhez nincs telepítve helyesírási szótár, ezért nem ellenőrzi. A WordCraft a(z) {name} Hunspell-szótárat a WORDCRAFT_DICTIONARIES mappában és a szokásos rendszerhelyeken keresi.
 	Lasso	Lasszó
 	Last Column	Utolsó oszlop
 	Last commit	Utolsó commit
@@ -2577,3 +2579,10 @@
 
 # Ask Agent
 	Ask\nAgent	Ügynök\nkérdezése
+# Page Setup › Mirror margins (#1239)
+	Mirror margins	Tükrözött margók
+
+# Insert Hyperlink › Place in This Document (#1370)
+	Existing File or Web Page	Létező fájl vagy weblap
+	Link to:	Hivatkozás helye:
+	Place in This Document	Dokumentumon belüli hely

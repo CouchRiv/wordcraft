@@ -376,6 +376,8 @@
 	Labels	Etykiety
 	Landscape	Pozioma
 	Language	Język
+	{language} (no dictionary)	{language} (brak słownika)
+	No spelling dictionary for {language} is installed, so it isn't checked. WordCraft looks for the Hunspell dictionary {name} in the WORDCRAFT_DICTIONARIES folder and in the usual system locations.	Nie zainstalowano słownika pisowni dla języka: {language}, więc tekst nie jest sprawdzany. WordCraft szuka słownika Hunspell {name} w folderze WORDCRAFT_DICTIONARIES i w typowych lokalizacjach systemowych.
 	Lasso	Lasso
 	Last Column	Ostatnia kolumna
 	Last commit	Ostatni commit
@@ -2591,3 +2593,11 @@ preview	Title	Tytuł
 
 # Backstage › Recover (#586)
 	Recover	Odzyskaj
+
+# Page Setup › Mirror margins (#1239)
+	Mirror margins	Marginesy lustrzane
+
+# Insert Hyperlink › Place in This Document (#1370)
+	Existing File or Web Page	Istniejący plik lub strona sieci Web
+	Link to:	Połącz z:
+	Place in This Document	Miejsce w tym dokumencie

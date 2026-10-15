@@ -88,6 +88,7 @@ pub fn shape_outline(kind: ShapeKind, w: f32, h: f32, corner: Option<u32>) -> Op
             pts
         }
         ShapeKind::Triangle => vec![(0.5, 0.0), (1.0, 1.0), (0.0, 1.0)],
+        ShapeKind::RightTriangle => vec![(0.0, 0.0), (1.0, 1.0), (0.0, 1.0)],
         ShapeKind::Diamond => vec![(0.5, 0.0), (1.0, 0.5), (0.5, 1.0), (0.0, 0.5)],
         ShapeKind::Arrow => {
             // As drawn: the head is half the height long, the shaft 40% of the height thick.
@@ -217,6 +218,7 @@ mod tests {
             ShapeKind::Ellipse,
             ShapeKind::RoundedRectangle,
             ShapeKind::Triangle,
+            ShapeKind::RightTriangle,
             ShapeKind::Diamond,
             ShapeKind::Arrow,
             ShapeKind::Star,

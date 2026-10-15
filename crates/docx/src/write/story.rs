@@ -74,7 +74,16 @@ impl Writer<'_> {
             self.move_ranges(w, &[]);
         }
         if bl.last().is_none_or(|b| matches!(**b, Block::Table(_))) {
-            w.raw("<w:p/>");
+            // A header with no paragraph of its own before: the watermark goes in this one.
+            if depth == 0
+                && let Some(run) = self.pending_watermark.take()
+            {
+                w.raw("<w:p>");
+                w.raw(&run);
+                w.raw("</w:p>");
+            } else {
+                w.raw("<w:p/>");
+            }
         }
     }
 
@@ -206,6 +215,12 @@ impl Writer<'_> {
             w.raw("<w:r><w:rPr><w:vertAlign w:val=\"superscript\"/></w:rPr>");
             w.empty(mark, &[]);
             w.raw("</w:r>");
+        }
+        // A header's watermark, in its first top-level paragraph (not a table cell or text box).
+        if depth == 0
+            && let Some(run) = self.pending_watermark.take()
+        {
+            w.raw(&run);
         }
         // Taken before the content so a nested story (a text box in an entry) can't claim them.
         if std::mem::take(&mut self.toc_begin_here)
@@ -971,6 +986,7 @@ impl Writer<'_> {
             ShapeKind::RoundedRectangle => "roundRect",
             ShapeKind::Ellipse => "ellipse",
             ShapeKind::Triangle => "triangle",
+            ShapeKind::RightTriangle => "rtTriangle",
             ShapeKind::Diamond => "diamond",
             ShapeKind::Line => "line",
             ShapeKind::StraightConnector => "straightConnector1",
@@ -1240,9 +1256,34 @@ impl Writer<'_> {
         w.close("w:tbl");
     }
 
+    /// The section's headers, plus the header holding only the watermark in each slot the
+    /// pages show (first page with a title page, even pages with even/odd headers) that has no
+    /// header of its own or linked from an earlier section. Sections are written in body order.
+    fn watermark_headers(&mut self, s: &SectionProps) -> wordcraft_doc::section::HeaderSet {
+        let mut set = s.headers;
+        let linked = &mut self.linked_headers;
+        if self.doc.settings.watermark.as_ref().and_then(super::watermark::text).is_some() {
+            let id = self.wm_header;
+            if set.default.or(linked.default).is_none() {
+                set.default = Some(id);
+            }
+            if s.title_page && set.first.or(linked.first).is_none() {
+                set.first = Some(id);
+            }
+            if self.doc.settings.even_odd_headers && set.even.or(linked.even).is_none() {
+                set.even = Some(id);
+            }
+        }
+        linked.default = set.default.or(linked.default);
+        linked.first = set.first.or(linked.first);
+        linked.even = set.even.or(linked.even);
+        set
+    }
+
     pub fn sectpr(&mut self, w: &mut W, s: &SectionProps, rels: &mut PartRels) {
         w.open("w:sectPr", &[]);
-        for (set, footer) in [(&s.headers, false), (&s.footers, true)] {
+        let headers = self.watermark_headers(s);
+        for (set, footer) in [(&headers, false), (&s.footers, true)] {
             for (kind, id) in [("default", set.default), ("first", set.first), ("even", set.even)] {
                 let Some(id) = id else { continue };
                 if let Some(rid) = self.hf_rel(id, footer, rels) {
@@ -1349,9 +1390,10 @@ fn sectpr_body(w: &mut W, s: &SectionProps) {
             w.empty("w:cols", &refs);
         }
         match s.valign {
-            wordcraft_doc::props::VAlign::Top => {}
-            wordcraft_doc::props::VAlign::Center => w.val("w:vAlign", "center"),
-            wordcraft_doc::props::VAlign::Bottom => w.val("w:vAlign", "bottom"),
+            wordcraft_doc::section::PageVAlign::Top => {}
+            wordcraft_doc::section::PageVAlign::Center => w.val("w:vAlign", "center"),
+            wordcraft_doc::section::PageVAlign::Justify => w.val("w:vAlign", "both"),
+            wordcraft_doc::section::PageVAlign::Bottom => w.val("w:vAlign", "bottom"),
         }
         if s.title_page {
             w.empty("w:titlePg", &[]);

@@ -1108,9 +1108,8 @@ fn all_caps_and_small_caps_text_extracts_as_displayed() {
     ] {
         assert!(text.contains(line), "missing {line:?} in {text:?}");
     }
-    // An All Caps ß is drawn today as one S glyph, so it reads as that S: the text layer follows
-    // the glyph drawn. Drawing it as "SS", as Word does, is a separate display issue.
-    assert!(text.contains("STRASE"), "{text:?}");
+    // An All Caps ß is drawn as SS, as Word does (#1581), and reads as the SS drawn.
+    assert!(text.contains("STRASSE"), "{text:?}");
 }
 
 #[test]

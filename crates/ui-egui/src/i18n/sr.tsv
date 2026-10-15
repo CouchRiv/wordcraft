@@ -565,6 +565,8 @@
 	Labels	Налепнице
 	Landscape	Положено
 	Language	Језик
+	{language} (no dictionary)	{language} (нема речника)
+	No spelling dictionary for {language} is installed, so it isn't checked. WordCraft looks for the Hunspell dictionary {name} in the WORDCRAFT_DICTIONARIES folder and in the usual system locations.	Правописни речник за {language} није инсталиран, па се текст не проверава. WordCraft тражи Hunspell речник {name} у фасцикли WORDCRAFT_DICTIONARIES и на уобичајеним системским локацијама.
 	Lasso	Ласо
 	Last Column	Задња колона
 	Last commit	Задњи commit
@@ -2196,3 +2198,10 @@
 
 # Ask Agent
 	Ask\nAgent	Питај\nагента
+# Page Setup › Mirror margins (#1239)
+	Mirror margins	Пресликане маргине
+
+# Insert Hyperlink › Place in This Document (#1370)
+	Existing File or Web Page	Постојећа датотека или веб страница
+	Link to:	Веза ка:
+	Place in This Document	Место у овом документу

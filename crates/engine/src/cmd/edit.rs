@@ -125,7 +125,8 @@ pub fn specs() -> Vec<CommandSpec> {
             s.ui_requests.push(json!({"open": tab}));
             Ok(json!({"open": tab}))
         })
-        .key("Mod+H")
+        // Word for Mac's own key is ⌃H.
+        .key(super::mac_or("Mod+H / Ctrl+H", "Mod+H"))
         .params(r#"{"tab"?: "find|replace|goto" (default replace)}"#)
         .pure(),
         CommandSpec::new("edit.replaceAll", "Replace All", "Home › Editing › Replace", replace_all)
@@ -684,6 +685,11 @@ fn goto(s: &mut Session, v: &Value) -> CmdResult {
         return sel_result(s);
     }
     if let Some(name) = p::str(v, "bookmark") {
+        // Word's built-in bookmark: the top of the document.
+        if name == "_top" {
+            s.sel = Selection::caret(Pos::body(0, 0));
+            return sel_result(s);
+        }
         // As in Word, the bookmark's text is selected (a caret for an empty bookmark).
         let (from, to) = super::insert::bookmark_range(&s.doc, name).ok_or_else(|| CmdError::Failed(format!("no bookmark `{name}`")))?;
         s.sel = Selection { anchor: from, focus: to };

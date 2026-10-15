@@ -7,6 +7,7 @@ mod math;
 mod props;
 mod sdt;
 mod story;
+mod watermark;
 mod wordart;
 
 use std::collections::{BTreeMap, HashMap};
@@ -83,6 +84,13 @@ pub(crate) struct Writer<'d> {
     endnotes: Vec<u32>,
     /// Header/footer part id → (file name, is footer).
     hf: Vec<(u32, String, bool)>,
+    /// The headers each slot has so far in body order, with sections' empty slots linked to the
+    /// ones before (as layout shows them): where a watermark needs a header of its own.
+    linked_headers: wordcraft_doc::section::HeaderSet,
+    /// The part id standing for a header written only to hold the watermark (no such part).
+    wm_header: u32,
+    /// The watermark shape to put at the start of the next top-level paragraph (a header's first).
+    pending_watermark: Option<String>,
     /// Paragraphs that need a `w14:paraId` (last paragraph of each comment), by address.
     para_ids: HashMap<usize, String>,
     /// A note reference mark to put at the start of the next paragraph.
@@ -149,6 +157,9 @@ pub(crate) fn write_parts(doc: &Document, flavor: Flavor) -> Result<Vec<(String,
         footnotes: Vec::new(),
         endnotes: Vec::new(),
         hf: Vec::new(),
+        linked_headers: Default::default(),
+        wm_header: (0..=u32::MAX).rev().find(|id| !doc.parts.contains_key(id)).unwrap_or(u32::MAX),
+        pending_watermark: None,
         para_ids: HashMap::new(),
         pending_mark: None,
         current_note: None,
@@ -231,7 +242,14 @@ pub(crate) fn write_parts(doc: &Document, flavor: Flavor) -> Result<Vec<(String,
         let tag = if footer { "w:ftr" } else { "w:hdr" };
         w.open(tag, &ns_refs);
         let blocks: Blocks = doc.parts.get(&id).map(|p| p.blocks.clone()).unwrap_or_default();
+        // The watermark goes in every header, at the start of its first paragraph.
+        wr.pending_watermark = match &doc.settings.watermark {
+            Some(wm) if !footer => watermark::run(wm, done, &doc.last_section),
+            _ => None,
+        };
         wr.blocks(&mut w, &blocks, &mut prels, false, 0);
+        // Always taken: the story ends with a top-level paragraph.
+        wr.pending_watermark = None;
         w.close(tag);
         push_part(
             &mut entries,
@@ -622,7 +640,7 @@ impl Writer<'_> {
     }
 
     fn hf_rel(&mut self, part: u32, footer: bool, rels: &mut PartRels) -> Option<String> {
-        let kind = self.doc.parts.get(&part)?.kind;
+        let kind = if part == self.wm_header && !footer { PartKind::Header } else { self.doc.parts.get(&part)?.kind };
         if !matches!(kind, PartKind::Header | PartKind::Footer) {
             return None;
         }
@@ -1031,6 +1049,10 @@ fn settings_xml(doc: &Document, footnotes: bool, endnotes: bool, template_rel: O
         w.close(tag);
     }
     w.open("w:compat", &[]);
+    // CT_Compat: the older switches come before the `w:compatSetting`s.
+    if doc.settings.sum_paragraph_spacing {
+        w.empty("w:doNotUseHTMLParagraphAutoSpacing", &[]);
+    }
     if s.allow_space_of_same_style_in_table {
         w.empty("w:allowSpaceOfSameStyleInTable", &[]);
     }

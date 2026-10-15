@@ -2629,3 +2629,14 @@
 	Enter to send, Shift+Enter for a new line	Enter để gửi, Shift+Enter để xuống dòng
 	Failed	Thất bại
 	Open request	Mở yêu cầu
+# Page Setup › Mirror margins (#1239)
+	Mirror margins	Lề đối xứng
+
+# Insert Hyperlink › Place in This Document (#1370)
+	Existing File or Web Page	Tệp hoặc trang web hiện có
+	Link to:	Liên kết tới:
+	Place in This Document	Vị trí trong tài liệu này
+
+# Missing dictionary on the status bar (#1441)
+	No spelling dictionary for {language} is installed, so it isn't checked. WordCraft looks for the Hunspell dictionary {name} in the WORDCRAFT_DICTIONARIES folder and in the usual system locations.	Chưa cài từ điển chính tả cho {language}, nên ngôn ngữ này không được kiểm tra. WordCraft tìm từ điển Hunspell {name} trong thư mục WORDCRAFT_DICTIONARIES và ở các vị trí thông thường của hệ thống.
+	{language} (no dictionary)	{language} (không có từ điển)

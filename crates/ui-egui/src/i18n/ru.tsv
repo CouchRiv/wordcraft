@@ -387,6 +387,8 @@
 	Labels	Наклейки
 	Landscape	Альбомная
 	Language	Язык
+	{language} (no dictionary)	{language} (нет словаря)
+	No spelling dictionary for {language} is installed, so it isn't checked. WordCraft looks for the Hunspell dictionary {name} in the WORDCRAFT_DICTIONARIES folder and in the usual system locations.	Орфографический словарь для языка «{language}» не установлен, поэтому текст не проверяется. WordCraft ищет словарь Hunspell {name} в папке WORDCRAFT_DICTIONARIES и в обычных системных расположениях.
 	Lasso	Лассо
 	Last Column	Последний столбец
 	Last commit	Последний коммит
@@ -2579,3 +2581,10 @@ preview	Title	Пример
 
 # Ask Agent
 	Ask\nAgent	Спросить\nагента
+# Page Setup › Mirror margins (#1239)
+	Mirror margins	Зеркальные поля
+
+# Insert Hyperlink › Place in This Document (#1370)
+	Existing File or Web Page	Файл или веб-страница
+	Link to:	Связать с:
+	Place in This Document	Место в документе

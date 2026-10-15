@@ -109,6 +109,7 @@ pub fn enabled(app: &WordApp, id: &str) -> bool {
         None if id == "ui.linkTextBox" => enabled(app, "shape.link"),
         // Ask Agent: a control channel with an agent listening on it.
         None if id == "ui.askAgent" => app.ask_agent.unavailable().is_none(),
+        None if id == "ui.crop" => crate::crop::can_toggle(app),
         None => id.starts_with("ui."),
     }
 }

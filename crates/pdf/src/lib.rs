@@ -558,6 +558,7 @@ fn shape_path(kind: ShapeKind, r: &Rect, corner: Option<u32>) -> Option<Path> {
         }
         ShapeKind::Ellipse => ellipse(&mut pb, cx, cy, r.w / 2.0, r.h / 2.0),
         ShapeKind::Triangle => poly(&mut pb, &[(cx, y0), (x1, y1), (x0, y1)]),
+        ShapeKind::RightTriangle => poly(&mut pb, &[(x0, y0), (x1, y1), (x0, y1)]),
         ShapeKind::Diamond => poly(&mut pb, &[(cx, y0), (x1, cy), (cx, y1), (x0, cy)]),
         // DrawingML's `line`: top-left to bottom-right (flips give the other directions).
         ShapeKind::Line => {
@@ -836,8 +837,14 @@ impl Exporter<'_> {
 
     /// Display items for one placed item.
     fn draws(&self, page: &Page, it: &Placed, dopts: &DisplayOptions) -> Vec<Draw> {
-        let one =
-            Page { w: page.w, h: page.h, section: page.section, number: page.number, items: vec![it.clone()], body: page.body, ..Default::default() };
+        let mut items = vec![it.clone()];
+        // Lines in a cell cut off at its edge are drawn inside its clip: `page_display` finds the
+        // cell among the items (cells themselves draw nothing).
+        if matches!(it, Placed::Lines { .. }) {
+            let clipped = page.header.iter().chain(&page.footer).chain(&page.items).filter(|c| matches!(c, Placed::Cell { clip: true, .. }));
+            items.extend(clipped.cloned());
+        }
+        let one = Page { w: page.w, h: page.h, section: page.section, number: page.number, items, body: page.body, ..Default::default() };
         page_display(self.doc, &one, dopts)
     }
 

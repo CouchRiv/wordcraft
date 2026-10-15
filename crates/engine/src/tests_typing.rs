@@ -52,7 +52,17 @@ fn typed(keys: &str) -> Session {
 #[test]
 fn sample_text_formulas_expand_on_enter() {
     for name in ["rand", "lorem"] {
-        for (args, paragraphs, sentences) in [("", 5, 3), ("2", 2, 3), ("2,4", 2, 4), ("1,1", 1, 1), ("200,1", 200, 1), ("1,200", 1, 200)] {
+        for (args, paragraphs, sentences) in [
+            ("", 5, 3),
+            ("2", 2, 3),
+            (" 2 ", 2, 3),
+            ("2,4", 2, 4),
+            ("2, 4", 2, 4),
+            (" 2 , 4 ", 2, 4),
+            ("1,1", 1, 1),
+            ("200,1", 200, 1),
+            ("1,200", 1, 200),
+        ] {
             let mut s = typed(&format!("={name}({args})"));
             let depth = s.undo_depth();
             typ(&mut s, "\n");
@@ -357,8 +367,8 @@ fn web_addresses_become_links() {
 
 #[test]
 fn dashes() {
-    let s = typed("a -- b and c - d and e--f ");
-    assert_eq!(s.doc.plain_text(StoryRef::Body), "A – b and c – d and e—f ");
+    let s = typed("a -- b and c - d and e--f and café--g ");
+    assert_eq!(s.doc.plain_text(StoryRef::Body), "A – b and c – d and e—f and café—g ");
 }
 
 #[test]

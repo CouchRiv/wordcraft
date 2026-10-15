@@ -525,6 +525,8 @@
 	Labels	Etiquetas
 	Landscape	Horizontal
 	Language	Idioma
+	{language} (no dictionary)	{language} (sin diccionario)
+	No spelling dictionary for {language} is installed, so it isn't checked. WordCraft looks for the Hunspell dictionary {name} in the WORDCRAFT_DICTIONARIES folder and in the usual system locations.	No hay un diccionario ortográfico instalado para {language}, así que no se revisa. WordCraft busca el diccionario Hunspell {name} en la carpeta WORDCRAFT_DICTIONARIES y en las ubicaciones habituales del sistema.
 	Lasso	Lazo
 	Last Column	Última columna
 	Last commit	Último commit
@@ -2548,3 +2550,10 @@ preview	Title	Título
 
 # Ask Agent
 	Ask\nAgent	Preguntar\nal agente
+# Page Setup › Mirror margins (#1239)
+	Mirror margins	Márgenes simétricos
+
+# Insert Hyperlink › Place in This Document (#1370)
+	Existing File or Web Page	Archivo o página web existente
+	Link to:	Vincular a:
+	Place in This Document	Lugar de este documento

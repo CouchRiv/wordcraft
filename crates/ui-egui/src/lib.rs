@@ -33,6 +33,7 @@ pub mod colors;
 pub mod content_controls;
 pub mod control;
 pub mod credits;
+pub mod crop;
 pub mod desktop_theme;
 pub mod dialogs;
 pub mod dialogs_chart;
@@ -723,6 +724,21 @@ impl WordApp {
         self.session.view.draw.pens = std::mem::take(&mut self.ui.ink_pens);
     }
 
+    /// Select the picture or icon the person just inserted or pasted, so it shows its handles.
+    /// `insert.picture` leaves the caret after it, which scripts and agents keep so their next
+    /// typing doesn't replace it (#965).
+    pub(crate) fn select_inserted_picture(&mut self, r: &Result<Value, String>) {
+        if !r.as_ref().is_ok_and(|v| v.get("media").is_some() && v.get("canvasMember").is_none()) || !self.session.sel.is_collapsed() {
+            return;
+        }
+        let end = self.session.sel.focus.clone();
+        let Some(off) = end.off.checked_sub(wordcraft_doc::para::OBJ.len_utf8()) else { return };
+        let start = wordcraft_doc::Pos { off, ..end.clone() };
+        if self.session.doc.para_at(&start).and_then(|p| p.object_at(off)).is_some_and(|o| o.is_drawing()) {
+            self.session.sel = wordcraft_engine::Selection { anchor: start, focus: end };
+        }
+    }
+
     /// Run a command the user asked for (ribbon, shortcut, Backstage, file drop). New, Open,
     /// Close, Envelopes, Labels and Finish & Merge on a document with unsaved changes first ask
     /// Save / Don't Save / Cancel, and the command runs once that is answered (`ui.saveChanges`).
@@ -765,6 +781,9 @@ impl WordApp {
             return r;
         }
         let r = self.execute_user(id, params);
+        if matches!(id, "insert.picture" | "insert.icon") {
+            self.select_inserted_picture(&r);
+        }
         let r = system_clipboard::explain(self, id, r);
         // Check Accessibility shows its findings in the Accessibility pane, kept up to date there.
         if id == "file.accessibility" && r.is_ok() {
@@ -1497,6 +1516,11 @@ impl WordApp {
             }
             // Shape Format › Text › Create Link: the next click on an empty text box links the
             // selected box to it (`shape.link` with that box as the target); Esc cancels.
+            // Picture Format › Size › Crop: crop mode on the selected picture, or off (`crop`).
+            "ui.crop" => match crop::toggle(self) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            },
             "ui.linkTextBox" => {
                 let from = wordcraft_engine::cmd::objects::text_box_target(&self.session).filter(|_| widgets::enabled(self, "shape.link"));
                 let Some((pos, _)) = from else { return Some(Err("select a text box that isn't linked yet first".into())) };
@@ -3309,6 +3333,63 @@ mod tests {
         assert!(!a.session.sel.is_collapsed(), "the drag left a selection");
     }
 
+    /// Issue #1388: the mouse wheel did nothing while a selection was being dragged, so a passage
+    /// longer than the screen couldn't be selected in one go.
+    #[test]
+    fn wheel_scrolls_the_view_while_drag_selecting() {
+        let ctx = egui::Context::default();
+        let mut a = app();
+        a.run("text.insert", json!({"text": "lorem ipsum dolor sit amet consectetur ".repeat(1200)})).unwrap();
+        // Start at the top: typing left the caret (and the view) at the end.
+        a.run("caret.docStart", json!({})).unwrap();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 600.0));
+        let mut t = 0.0;
+        let mut frame = |a: &mut WordApp, events: Vec<egui::Event>| {
+            t += 1.0 / 60.0;
+            let input = egui::RawInput { events, time: Some(t), screen_rect: Some(screen), ..Default::default() };
+            ctx.run_ui(input, |ui| {
+                a.logic(ui.ctx());
+                a.ui(ui);
+            })
+            .drop_without_applying_deltas();
+        };
+        for _ in 0..3 {
+            frame(&mut a, Vec::new());
+        }
+        let (Some(vp), Some(page)) = (a.canvas.viewport, a.canvas.page_rects.first()) else { panic!("the canvas laid out") };
+        let start = page.left_top() + egui::vec2(120.0, 150.0);
+        frame(&mut a, vec![egui::Event::PointerMoved(start)]);
+        frame(
+            &mut a,
+            vec![egui::Event::PointerButton { pos: start, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() }],
+        );
+        // Drag to the middle of the view, well away from the edges that auto-scroll.
+        let mid = vp.center();
+        for _ in 0..5 {
+            frame(&mut a, vec![egui::Event::PointerMoved(mid)]);
+        }
+        assert!(a.canvas.drag_selecting(), "the press started a drag-select");
+        assert_eq!(a.canvas.scroll_offset.y, 0.0, "nothing scrolled before the wheel");
+        let base = a.session.sel.focus.clone();
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, -3.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&mut a, vec![egui::Event::PointerMoved(mid), wheel]);
+        for _ in 0..30 {
+            frame(&mut a, vec![egui::Event::PointerMoved(mid)]);
+        }
+        assert!(a.canvas.scroll_offset.y > 0.0, "the wheel scrolled the view during the drag");
+        assert!(a.session.sel.focus > base, "the selection followed the content under the pointer");
+        frame(
+            &mut a,
+            vec![egui::Event::PointerButton { pos: mid, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() }],
+        );
+        assert!(!a.session.sel.is_collapsed(), "the drag left a selection");
+    }
+
     /// #1013: a press inside the selected comment's balloon (to move the caret in its text) left
     /// the balloon, because the canvas under it also "contained" the pointer.
     #[test]
@@ -4102,6 +4183,53 @@ mod tests {
         }
     }
 
+    /// #1597: the prompt takes the keyboard from the page. The canvas, focused while typing, keeps
+    /// Tab and the arrows for itself; Save still has focus when the prompt opens over it, and the
+    /// arrows move between the prompt's buttons instead of the caret.
+    #[test]
+    fn save_prompt_takes_focus_from_the_page() {
+        use egui_kittest::kittest::Queryable;
+        let dir = scratch("prompt-over-page");
+        let path = docx_on_disk(&dir, "Draft");
+        let before = std::fs::read(&path).unwrap();
+        let mut a = app();
+        a.run("file.open", json!({"path": path.to_string_lossy()})).unwrap();
+        a.run("text.insert", json!({"text": "Revised "})).unwrap();
+        a.canvas.want_focus = true;
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+            |ui, app: &mut WordApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            a,
+        );
+        for _ in 0..6 {
+            h.step();
+        }
+        assert!(h.state().canvas.focused, "the page has keyboard focus");
+        h.state_mut().run("file.close", json!({})).unwrap();
+        for _ in 0..3 {
+            h.step();
+        }
+        assert_eq!(prompt(h.state()), Some("saveChanges"));
+        let focused = |h: &egui_kittest::Harness<WordApp>, label: &str| h.query_all_by_label(label).any(|n| n.is_focused());
+        assert!(focused(&h, "Save"), "Save has focus when the prompt opens");
+        let caret = h.state().session.sel.focus.clone();
+        h.key_press(egui::Key::ArrowRight);
+        h.step();
+        assert!(focused(&h, "Don't Save"), "the arrow moved to Don't Save");
+        assert_eq!(h.state().session.sel.focus, caret, "the caret stayed where it was");
+        h.key_press(egui::Key::Enter);
+        for _ in 0..3 {
+            h.step();
+        }
+        assert_eq!(prompt(h.state()), None, "answered");
+        assert!(h.state().quit_requested, "Don't Save closes");
+        assert_eq!(std::fs::read(&path).unwrap(), before, "nothing was saved");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// `ui.print` hands the document's PDF to the host's print hook, and is an error (with
     /// nothing printed) when the host has none.
     #[test]
@@ -4546,6 +4674,33 @@ mod tests {
         assert_eq!(h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body), "Kilns");
     }
 
+    /// #1538: inserting WordArt leaves its text selected, so Delete erased only the text and the
+    /// empty box stayed. Escape now selects the box itself, Delete removes it, and a second Escape
+    /// is back to a caret in the body.
+    #[test]
+    fn escape_selects_a_wordart_box_and_delete_removes_it() {
+        let mut a = app();
+        let id = a.run("insert.wordArt", json!({})).unwrap()["story"].as_u64().unwrap() as u32;
+        assert!(canvas::in_text_box(&a), "the WordArt's text is selected after inserting it");
+        let mut h = harness(a);
+        h.run_steps(4);
+        h.key_press(egui::Key::Escape);
+        h.run_steps(2);
+        assert!(wordcraft_engine::cmd::objects::object_selection(&h.state().session).is_some(), "Escape selects the box");
+        h.key_press(egui::Key::Delete);
+        h.run_steps(2);
+        assert_eq!(h.state().session.doc.text_box_anchor(id), None, "Delete removed the WordArt");
+        assert!(h.state_mut().session.undo(), "one undo brings it back");
+        assert!(h.state().session.doc.text_box_anchor(id).is_some());
+        h.run_steps(2);
+        h.key_press(egui::Key::Escape);
+        h.run_steps(2);
+        h.key_press(egui::Key::Escape);
+        h.run_steps(2);
+        let s = &h.state().session;
+        assert!(s.sel.is_collapsed() && s.sel.focus.story == wordcraft_doc::StoryRef::Body, "a second Escape leaves a caret in the body");
+    }
+
     /// #1218: Ctrl+Q resets the paragraph formatting and nothing else; it also closed the window
     /// (asking to save) on Windows and Linux. ⌘Q still quits on the Mac.
     #[test]
@@ -4985,6 +5140,65 @@ mod tests {
         control::handle(&mut a, &ctx, &req);
         assert_eq!(prompt(&a), None);
         assert!(!body_text(&a).contains(UNSAVED));
+    }
+
+    /// Send `engine.execute` the way the control channel does and return the reply (#1268).
+    fn control_execute(a: &mut WordApp, params: Value) -> Value {
+        let ctx = egui::Context::default();
+        let (req, _reply) = ControlRequest::new("engine.execute", params);
+        match control::handle(a, &ctx, &req) {
+            control::Outcome::Done(v) => v,
+            _ => json!({"ok": false, "error": "not a reply"}),
+        }
+    }
+
+    /// A programmatic `file.close` on unsaved work doesn't quit and lose it (#1268).
+    #[test]
+    fn programmatic_close_keeps_unsaved_work() {
+        let mut a = typed();
+        let r = control_execute(&mut a, json!({"command": "file.close"}));
+        assert_eq!(r["ok"], json!(false), "{r}");
+        let e = r["error"].as_str().unwrap_or("");
+        assert!(e.contains("unsaved") && e.contains("force"), "{e}");
+        assert!(!a.quit_requested);
+        assert!(body_text(&a).contains(UNSAVED));
+
+        let r = control_execute(&mut a, json!({"command": "file.close", "params": {"force": true}}));
+        assert_eq!(r["ok"], json!(true), "{r}");
+        assert!(a.quit_requested);
+
+        let mut clean = app();
+        let r = control_execute(&mut clean, json!({"command": "file.close"}));
+        assert_eq!(r["ok"], json!(true), "{r}");
+        assert!(clean.quit_requested);
+    }
+
+    /// Every way to name `file.close` over the control channel is guarded (#1268).
+    #[test]
+    fn programmatic_close_guard_covers_every_form() {
+        let ctx = egui::Context::default();
+        let send = |a: &mut WordApp, method: &str, params: Value| match control::handle(a, &ctx, &ControlRequest::new(method, params).0) {
+            control::Outcome::Done(v) => v,
+            _ => json!({"ok": false, "error": "not a reply"}),
+        };
+        let refused = [
+            ("file.close", json!({})),
+            ("command", json!({"id": "file.close"})),
+            ("command", json!({"command": "file.close", "params": {"force": "yes"}})),
+            ("file.close", json!({"force": "yes"})),
+            ("file.close", json!({"force": 1})),
+        ];
+        for (method, params) in refused {
+            let mut a = typed();
+            let r = send(&mut a, method, params.clone());
+            assert_eq!(r["ok"], json!(false), "{method} {params}: {r}");
+            assert!(!a.quit_requested, "{method} {params}");
+            assert!(body_text(&a).contains(UNSAVED));
+        }
+        let mut a = typed();
+        let r = send(&mut a, "file.close", json!({"force": true}));
+        assert_eq!(r["ok"], json!(true), "{r}");
+        assert!(a.quit_requested);
     }
 
     const MAILINGS: [&str; 3] = ["mailings.envelopes", "mailings.labels", "mailings.finish"];
@@ -5721,6 +5935,24 @@ mod tests {
 
     fn object_count(a: &mut WordApp) -> usize {
         a.session.run("arrange.selectionPane", &json!({})).unwrap().as_array().map(|x| x.len()).unwrap_or(0)
+    }
+
+    /// #965: a picture or icon the person inserts is selected, with handles, as in Word; one a
+    /// script inserts (control channel, MCP bridge) leaves the caret after it, and typing keeps it.
+    #[test]
+    fn inserted_picture_is_selected_for_the_user_not_for_scripts() {
+        let data = wordcraft_engine::cmd::insert::base64_encode(&png_bytes([200, 30, 30, 255]));
+        for (id, params) in [("insert.picture", json!({"data": data})), ("insert.icon", json!({"id": "sun"}))] {
+            let mut a = app();
+            a.run(id, params.clone()).unwrap();
+            assert!(crate::objects::selected(&a).is_some(), "{id}: the person's picture is selected");
+            let mut a = app();
+            a.execute(id, params).unwrap();
+            assert!(a.session.sel.is_collapsed() && crate::objects::selected(&a).is_none(), "{id}: a script gets the caret after it");
+            a.execute("text.newParagraph", json!({})).unwrap();
+            a.execute("text.insert", json!({"text": "cap"})).unwrap();
+            assert_eq!(object_count(&mut a), 1, "{id}");
+        }
     }
 
     /// A picture pasted in the browser lands only when the page is the edit target (#1349);

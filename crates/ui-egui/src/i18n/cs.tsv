@@ -619,6 +619,8 @@
 	Labels	Štítky
 	Landscape	Na šířku
 	Language	Jazyk
+	{language} (no dictionary)	{language} (bez slovníku)
+	No spelling dictionary for {language} is installed, so it isn't checked. WordCraft looks for the Hunspell dictionary {name} in the WORDCRAFT_DICTIONARIES folder and in the usual system locations.	Pro jazyk {language} není nainstalován žádný pravopisný slovník, proto se nekontroluje. WordCraft hledá slovník Hunspell {name} ve složce WORDCRAFT_DICTIONARIES a na obvyklých místech v systému.
 	Large\nOperator	Velký\noperátor
 	Lasso	Laso
 	Last Column	Poslední sloupec
@@ -2573,3 +2575,10 @@ preview	Title	Ukázka
 
 # Ask Agent
 	Ask\nAgent	Zeptat se\nagenta
+# Page Setup › Mirror margins (#1239)
+	Mirror margins	Zrcadlové okraje
+
+# Insert Hyperlink › Place in This Document (#1370)
+	Existing File or Web Page	Existující soubor nebo webová stránka
+	Link to:	Odkaz na:
+	Place in This Document	Místo v tomto dokumentu

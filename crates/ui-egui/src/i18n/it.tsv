@@ -454,6 +454,8 @@
 	Labels	Etichette
 	Landscape	Orizzontale
 	Language	Lingua
+	{language} (no dictionary)	{language} (nessun dizionario)
+	No spelling dictionary for {language} is installed, so it isn't checked. WordCraft looks for the Hunspell dictionary {name} in the WORDCRAFT_DICTIONARIES folder and in the usual system locations.	Non è installato alcun dizionario ortografico per {language}, quindi non viene controllata. WordCraft cerca il dizionario Hunspell {name} nella cartella WORDCRAFT_DICTIONARIES e nelle posizioni di sistema abituali.
 	Lasso	Lazo
 	Last Column	Ultima colonna
 	Last commit	Ultimo commit
@@ -2508,7 +2510,7 @@ preview	Title	Esempio
 	Remove my name from comments, changes and file properties when saving	Rimuovi il mio nome da commenti, modifiche e proprietà del file al salvataggio
 	Leave out the date and time of comments and tracked changes when saving	Ometti data e ora di commenti e revisioni al salvataggio
 	The document you are editing keeps the names and dates; only the saved file leaves them out.	Il documento che stai modificando conserva nomi e date; solo il file salvato li omette.
-	Privacy Settings	Impostazioni di privacy attuali
+	Privacy Settings	Impostazioni di privacy
 	Waiting for the save to finish…	In attesa del termine del salvataggio…
 	Saving {name} was cancelled, so it is still open and nothing was lost.	Il salvataggio di {name} è stato annullato: il documento è ancora aperto e non è andato perso nulla.
 	Paper	Carta
@@ -2590,3 +2592,10 @@ preview	Title	Esempio
 
 # Ask Agent
 	Ask\nAgent	Chiedi\nall’agente
+# Page Setup › Mirror margins (#1239)
+	Mirror margins	Margini speculari
+
+# Insert Hyperlink › Place in This Document (#1370)
+	Existing File or Web Page	File o pagina Web esistente
+	Link to:	Collega a:
+	Place in This Document	Posizione nel documento

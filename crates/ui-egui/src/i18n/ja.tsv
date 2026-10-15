@@ -513,6 +513,8 @@
 	Labels	ラベル
 	Landscape	横
 	Language	言語
+	{language} (no dictionary)	{language}（辞書なし）
+	No spelling dictionary for {language} is installed, so it isn't checked. WordCraft looks for the Hunspell dictionary {name} in the WORDCRAFT_DICTIONARIES folder and in the usual system locations.	{language}のスペルチェック辞書がインストールされていないため、チェックされません。WordCraft は Hunspell 辞書 {name} を WORDCRAFT_DICTIONARIES フォルダーと通常のシステムの場所から探します。
 	Lasso	なげなわ
 	Last Column	最後の列
 	Last commit	最後のコミット
@@ -2182,3 +2184,10 @@
 
 # Ask Agent
 	Ask\nAgent	エージェントに\n質問
+# Page Setup › Mirror margins (#1239)
+	Mirror margins	見開きページ
+
+# Insert Hyperlink › Place in This Document (#1370)
+	Existing File or Web Page	既存のファイル/Web ページ
+	Link to:	リンク先:
+	Place in This Document	このドキュメント内

@@ -85,9 +85,12 @@ display_name = "cyril265"
 display_name = "Jason Brashear"
 sync_github_name = false
 
+[people.lupant]
+sync_github_name = true
+[people.Nael-Nathanael]
+
 
 [people.Losminek]
-sync_github_name = true
 [people.benandez]
 real_name = "Martin Ball"
 display_name = "Martin Ball"
@@ -106,3 +109,6 @@ display_name = "The Legend Of MTS Dev"
 
 [people.dotCooCoo]
 real_name = "Robert Lee"
+
+[people.finwarman]
+real_name = "Fin Warman"

@@ -458,6 +458,8 @@
 	Labels	Етикети
 	Landscape	Пейзаж
 	Language	Език
+	{language} (no dictionary)	{language} (няма речник)
+	No spelling dictionary for {language} is installed, so it isn't checked. WordCraft looks for the Hunspell dictionary {name} in the WORDCRAFT_DICTIONARIES folder and in the usual system locations.	Не е инсталиран правописен речник за {language}, затова текстът не се проверява. WordCraft търси речника Hunspell {name} в папката WORDCRAFT_DICTIONARIES и на обичайните места в системата.
 	Lasso	Ласо
 	Last Column	Последна колона
 	Last commit	Последно подаване
@@ -2569,3 +2571,10 @@
 
 # Ask Agent
 	Ask\nAgent	Попитай\nагента
+# Page Setup › Mirror margins (#1239)
+	Mirror margins	Огледални полета
+
+# Insert Hyperlink › Place in This Document (#1370)
+	Existing File or Web Page	Съществуващ файл или уеб страница
+	Link to:	Връзка към:
+	Place in This Document	Място в този документ

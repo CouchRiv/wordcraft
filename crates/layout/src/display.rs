@@ -348,8 +348,17 @@ pub fn page_display(doc: &Document, page: &Page, opts: &DisplayOptions) -> Vec<D
     let ba = if opts.dim_body { 0.45 } else { 1.0 };
     for (items, a) in [(&page.header, ha), (&page.footer, ha), (&page.items, ba)] {
         let warps = warped_boxes(doc, items);
+        let clips = clipped_cells(items);
         let mut done: Vec<u32> = Vec::new();
         for it in items.iter() {
+            if let Placed::Lines { story, path, .. } = it
+                && let Some(rect) = cell_clip(&clips, *story, &path.0)
+            {
+                let mut inner = Vec::new();
+                item(doc, it, opts, a, &mut inner);
+                out.push(Draw::Clip { rect, items: inner });
+                continue;
+            }
             match it {
                 Placed::Lines { story: StoryRef::Part(id), .. } if warps.iter().any(|(w, ..)| w == id) => {
                     // A warped text box's lines are drawn together, bent, where its first one is.
@@ -388,6 +397,27 @@ pub fn object_display(doc: &Document, page: &Page, o: &InlineObject, rect: Rect,
         }
     }
     out
+}
+
+/// The cells among `items` whose content is cut off at their edge (see [`Placed::Cell`]'s
+/// `clip`): their story, the path of their content (table, row, cell) and their area.
+fn clipped_cells(items: &[Placed]) -> Vec<(StoryRef, Vec<u32>, Rect)> {
+    items
+        .iter()
+        .filter_map(|it| match it {
+            Placed::Cell { rect, table, row, cell, story, clip: true, .. } => {
+                let mut prefix = table.0.clone();
+                prefix.extend([u32::try_from(*row).ok()?, u32::try_from(*cell).ok()?]);
+                Some((*story, prefix, *rect))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The area to clip a line at `path` of `story` to: its cell's, when that cell is clipped.
+fn cell_clip(clips: &[(StoryRef, Vec<u32>, Rect)], story: StoryRef, path: &[u32]) -> Option<Rect> {
+    clips.iter().find(|(s, prefix, _)| *s == story && path.starts_with(prefix)).map(|(_, _, r)| *r)
 }
 
 /// The text boxes among `items` whose text is warped (Text Effects › Transform, drawn bent): their
@@ -668,7 +698,7 @@ fn lines(
             char_box(&ob, x0, x1, top, bottom, alpha, out);
         }
         // Label.
-        if li == 0
+        if li == pl.label_line()
             && let Some(lab) = &pl.label
         {
             let gx = x + lab.x;
@@ -750,8 +780,10 @@ fn lines(
                             text.push_str(&wordcraft_doc::symbol_fonts::map_text(&st.rc.font, t));
                         } else if st.rc.caps || st.rc.small_caps {
                             // All Caps and Small Caps read as the capitals drawn (#1473), mapped
-                            // as the shaper maps them, so a glyph never stands for two cases.
-                            text.extend(t.chars().map(|ch| crate::para::caps_char(&st.rc, ch)));
+                            // as drawn, so a glyph never stands for two cases and ß reads as SS (#1581).
+                            for ch in t.chars() {
+                                crate::para::push_caps(&st.rc, ch, &mut text);
+                            }
                         } else {
                             text.push_str(t);
                         }
