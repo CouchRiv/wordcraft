@@ -1,0 +1,111 @@
+{
+  "source": "real egui application captures with deterministic local agent replies; no external LLM",
+  "crop": [
+    240,
+    400,
+    2560,
+    1720
+  ],
+  "sequence": [
+    {
+      "frame": "01-select",
+      "seconds": 2,
+      "caption": "Select the content you want to change"
+    },
+    {
+      "frame": "02-open",
+      "seconds": 1.3,
+      "caption": "Open Ask Agent beside the selection"
+    },
+    {
+      "frame": "02b-agents",
+      "seconds": 2,
+      "caption": "Choose Claude Code or Codex"
+    },
+    {
+      "frame": "03-pick",
+      "seconds": 1,
+      "caption": "Claude Code selected"
+    },
+    {
+      "frame": "03a-actions",
+      "seconds": 2.5,
+      "caption": "Start with an action suited to this document"
+    },
+    {
+      "frame": "03aa-translate",
+      "seconds": 2,
+      "caption": "Explore translation actions: English or French"
+    },
+    {
+      "frame": "03b-rewrite",
+      "seconds": 2.5,
+      "caption": "Choose a specific action"
+    },
+    {
+      "frame": "03c-prefilled",
+      "seconds": 3,
+      "caption": "Review the prepared instruction; edit before Send"
+    },
+    {
+      "frame": "04-type2",
+      "seconds": 2.5,
+      "caption": "Describe the change"
+    },
+    {
+      "frame": "05-working",
+      "seconds": 2,
+      "caption": "The agent works on the selected content"
+    },
+    {
+      "frame": "06-held",
+      "seconds": 2.5,
+      "caption": "Concurrent edit refused: Held by Agent"
+    },
+    {
+      "frame": "07-edited",
+      "seconds": 2.5,
+      "caption": "The agent edits the actual document"
+    },
+    {
+      "frame": "08-answer",
+      "seconds": 3,
+      "caption": "Read the response; Keep or Undo"
+    },
+    {
+      "frame": "09-reply0",
+      "seconds": 0.4,
+      "caption": "Refine in the same thread"
+    },
+    {
+      "frame": "09-reply1",
+      "seconds": 0.4,
+      "caption": "Refine in the same thread"
+    },
+    {
+      "frame": "09-reply2",
+      "seconds": 2,
+      "caption": "Refine in the same thread"
+    },
+    {
+      "frame": "10-answer2",
+      "seconds": 3,
+      "caption": "The follow-up is part of the same undo step"
+    },
+    {
+      "frame": "11-kept",
+      "seconds": 4,
+      "caption": "Keep: close the bubble, retain signed comments"
+    },
+    {
+      "frame": "10-answer2",
+      "seconds": 2,
+      "caption": "Alternative: choose Undo instead of Keep"
+    },
+    {
+      "frame": "12-undone",
+      "seconds": 3.5,
+      "caption": "Undo restores the original in one step"
+    }
+  ]
+}

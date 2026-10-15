@@ -1,0 +1,20 @@
+01-select 2 Select the content you want to change
+02-open 1.3 Open Ask Agent beside the selection
+02b-agents 2 Choose Claude Code or Codex
+03-pick 1 Claude Code selected
+03a-actions 2.5 Start with an action suited to this document
+03aa-translate 2 Explore translation actions: English or French
+03b-rewrite 2.5 Choose a specific action
+03c-prefilled 3 Review the prepared instruction; edit before Send
+04-type2 2.5 Describe the change
+05-working 2 The agent works on the selected content
+06-held 2.5 Concurrent edit refused: Held by Agent
+07-edited 2.5 The agent edits the actual document
+08-answer 3 Read the response; Keep or Undo
+09-reply0 0.4 Refine in the same thread
+09-reply1 0.4 Refine in the same thread
+09-reply2 2 Refine in the same thread
+10-answer2 3 The follow-up is part of the same undo step
+11-kept 4 Keep: close the bubble, retain signed comments
+10-answer2 2 Alternative: choose Undo instead of Keep
+12-undone 3.5 Undo restores the original in one step

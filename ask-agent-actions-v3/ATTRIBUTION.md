@@ -1,0 +1,1 @@
+Contributor-original UI captures and fictional fixture. Author CouchRiv. License MIT OR Apache-2.0. Real document engine; scripted agent replies, not live model calls. Keep/Undo alternative branches. Source code commits in manifest.
