@@ -88,17 +88,15 @@ sync_github_name = false
 [people.lupant]
 sync_github_name = true
 [people.Nael-Nathanael]
-
-
 [people.Losminek]
-[people.benandez]
-real_name = "Martin Ball"
-display_name = "Martin Ball"
-
 [people.Nghiathan13]
+
+[people.leoncral]
+sync_github_name = true
 
 [people.finwarman]
 real_name = "Fin Warman"
+
 
 [people.albayazid]
 real_name = "Sazid Al Bayazid"

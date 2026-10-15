@@ -2169,6 +2169,24 @@
 	Suggested	Vorschläge
 	Set Proofing Language…	Sprache für die Korrekturhilfen festlegen…
 	Language Preferences…	Spracheinstellungen…
+	Printer	Drucker
+	Select a printer	Drucker auswählen
+	Refresh printers	Drucker aktualisieren
+	Two-sided printing	Beidseitiges Drucken
+	Printer default	Druckerstandard
+	One-sided	Einseitig
+	Two-sided: long edge	Beidseitig: lange Kante
+	Two-sided: short edge	Beidseitig: kurze Kante
+	Grayscale	Graustufen
+	Finding printers…	Drucker werden gesucht…
+	No printers found. Configure a system printer or export a PDF.	Keine Drucker gefunden. Richten Sie einen Systemdrucker ein oder exportieren Sie ein PDF.
+	Printer discovery failed.	Druckersuche fehlgeschlagen.
+	Submitting print job…	Druckauftrag wird gesendet…
+	Print job submitted.	Druckauftrag gesendet.
+	Print job submitted: {receipt}	Druckauftrag gesendet: {receipt}
+	Print failed: the printing worker stopped.	Drucken fehlgeschlagen: Der Druckvorgang wurde angehalten.
+	Print settings	Druckeinstellungen
+	Submit print job	Druckauftrag senden
 
 # Dictionaries folder (#1063)
 	Dictionaries	Wörterbücher

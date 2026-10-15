@@ -2204,6 +2204,24 @@
 	Suggested	Soovitused
 	Set Proofing Language…	Määra õigekeelsuskontrolli keel…
 	Language Preferences…	Keele-eelistused…
+	Printer	Printer
+	Select a printer	Vali printer
+	Refresh printers	Värskenda printereid
+	Two-sided printing	Kahepoolne printimine
+	Printer default	Printeri vaikesäte
+	One-sided	Ühepoolne
+	Two-sided: long edge	Kahepoolne: pikk serv
+	Two-sided: short edge	Kahepoolne: lühike serv
+	Grayscale	Halltoonid
+	Finding printers…	Printerite otsimine…
+	No printers found. Configure a system printer or export a PDF.	Printereid ei leitud. Seadista süsteemis printer või ekspordi PDF.
+	Printer discovery failed.	Printerite otsimine nurjus.
+	Submitting print job…	Prinditöö saatmine…
+	Print job submitted.	Prinditöö saadetud.
+	Print job submitted: {receipt}	Prinditöö saadetud: {receipt}
+	Print failed: the printing worker stopped.	Printimine nurjus: printimisprotsess peatus.
+	Print settings	Printimisseaded
+	Submit print job	Saada prinditöö
 
 # Dictionaries folder (#1063)
 	Dictionaries	Sõnastikud

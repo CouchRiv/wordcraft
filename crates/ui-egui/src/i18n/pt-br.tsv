@@ -2182,6 +2182,24 @@
 	Suggested	Sugestões
 	Set Proofing Language…	Definir idioma de revisão…
 	Language Preferences…	Preferências de idioma…
+	Printer	Impressora
+	Select a printer	Selecione uma impressora
+	Refresh printers	Atualizar impressoras
+	Two-sided printing	Impressão frente e verso
+	Printer default	Padrão da impressora
+	One-sided	Somente frente
+	Two-sided: long edge	Frente e verso: borda longa
+	Two-sided: short edge	Frente e verso: borda curta
+	Grayscale	Tons de cinza
+	Finding printers…	Localizando impressoras…
+	No printers found. Configure a system printer or export a PDF.	Nenhuma impressora encontrada. Configure uma impressora no sistema ou exporte um PDF.
+	Printer discovery failed.	Falha ao localizar impressoras.
+	Submitting print job…	Enviando trabalho de impressão…
+	Print job submitted.	Trabalho de impressão enviado.
+	Print job submitted: {receipt}	Trabalho de impressão enviado: {receipt}
+	Print failed: the printing worker stopped.	A impressão falhou: o processo de impressão parou.
+	Print settings	Configurações de impressão
+	Submit print job	Enviar trabalho de impressão
 
 # Dictionaries folder (#1063)
 	Dictionaries	Dicionários

@@ -2524,6 +2524,24 @@
 	Paper	Giấy
 	Paper size:	Khổ giấy:
 	The margins don't fit on a page this size; make the margins smaller first.	Lề không vừa với trang có kích thước này; hãy thu nhỏ lề trước.
+	Printer	Máy in
+	Select a printer	Chọn máy in
+	Refresh printers	Làm mới máy in
+	Two-sided printing	In hai mặt
+	Printer default	Mặc định của máy in
+	One-sided	In một mặt
+	Two-sided: long edge	Hai mặt: cạnh dài
+	Two-sided: short edge	Hai mặt: cạnh ngắn
+	Grayscale	Thang độ xám
+	Finding printers…	Đang tìm máy in…
+	No printers found. Configure a system printer or export a PDF.	Không tìm thấy máy in. Hãy thiết lập máy in hệ thống hoặc xuất PDF.
+	Printer discovery failed.	Không tìm được máy in.
+	Submitting print job…	Đang gửi lệnh in…
+	Print job submitted.	Đã gửi lệnh in.
+	Print job submitted: {receipt}	Đã gửi lệnh in: {receipt}
+	Print failed: the printing worker stopped.	In thất bại: tiến trình in đã dừng.
+	Print settings	Cài đặt in
+	Submit print job	Gửi lệnh in
 
 # Web Save before New/Open (#1510)
 	Saving {name} was cancelled, so it is still open and nothing was lost.	Đã hủy lưu {name}, nên tài liệu vẫn mở và không mất gì.

@@ -6685,6 +6685,22 @@ fn exported_page_images_draw_headers_at_full_strength() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Text typed right after a footnote or endnote number is plain body text, not another raised number.
+#[test]
+fn typing_after_a_note_number_is_not_superscript() {
+    for (cmd_id, style) in [("references.footnote", "FootnoteReference"), ("references.endnote", "EndnoteReference")] {
+        let mut s = s();
+        run(&mut s, "text.insert", json!({"text": "One"}));
+        run(&mut s, cmd_id, json!({"text": "Note"}));
+        s.sel = crate::Selection::caret(s.doc.end_of(StoryRef::Body));
+        assert_eq!(s.doc.para_at(&s.sel.focus).and_then(|p| p.props_at(p.len()).style.clone()).as_deref(), Some(style));
+        assert_eq!(s.typing_props().style, None, "{cmd_id}");
+        run(&mut s, "text.insert", json!({"text": " after"}));
+        let end = s.doc.end_of(StoryRef::Body);
+        assert_eq!(s.doc.para_at(&end).map(|p| p.props_of_char(p.len() - 1).style.clone()), Some(None), "{cmd_id}");
+    }
+}
+
 /// Gap 19, review: text inserted by one author and deleted by another keeps both marks through
 /// an ODT save, so Reject All (undo the deletion, then the insertion) and Accept All both remove it.
 #[test]
