@@ -202,7 +202,8 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context, _viewport: Rect) {
         comment_once(app, s);
     }
     let agents = hub.agents();
-    let view = ui::View { snapshot: snapshot.as_ref(), agents: &agents, actions: QUICK_ACTIONS };
+    let Some(open) = app.ask_agent.open.as_ref() else { return };
+    let view = ui::View { snapshot: snapshot.as_ref(), agents: &agents, actions: QUICK_ACTIONS, history: &open.turns, instruction: &open.asked };
     match ui::bubble(ctx, anchor, &view, &mut app.ask_agent.draft, &mut app.ask_agent.picked) {
         Some(ui::Action::Send(text)) => send(app, text),
         Some(ui::Action::Undo) => {
@@ -236,7 +237,8 @@ fn comment_once(app: &mut WordApp, s: &Snapshot) {
     if let Some(at) = target {
         (app.session.sel.anchor, app.session.sel.focus) = (at.clone(), at);
     }
-    let _ = app.session.run("review.newComment", &json!({"text": answer}));
+    let text = format!("You: {}\n\nAgent: {answer}", open.asked);
+    let _ = app.session.run("review.newComment", &json!({"text": text}));
     app.session.sel = sel;
     app.session.author = author;
 }
@@ -295,6 +297,8 @@ mod tests {
         assert_eq!(app.session.undo_depth(), before + 1, "the closing comment joins the step");
         let comment = app.session.doc.comments.values().next().unwrap();
         assert_eq!(comment.author, "Agent (Claude)");
+        let persisted = app.session.run("review.comments", &json!({})).unwrap().to_string();
+        assert!(persisted.contains("Shorter") && persisted.contains("Shortened."), "comment retains instruction and answer");
         assert!(held(&app, "text.insert").is_none(), "answered: the text is free");
     }
 
