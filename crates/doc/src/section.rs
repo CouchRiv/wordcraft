@@ -721,8 +721,16 @@ pub struct SectionProps {
     pub title_page: bool,
     pub page_num_start: Option<u32>,
     pub page_num_format: NumFormat,
+    /// The file carries a `w:pgNumType` element that sets nothing else (no start, decimal
+    /// format), so saving writes it back rather than dropping it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub page_num_set: bool,
     pub line_numbers: Option<LineNumbering>,
     pub valign: PageVAlign,
+    /// Form protection of the section (`w:formProt`, ECMA-376 §17.6.6): `Some` when the file
+    /// states it. Kept so saving writes it back; editing does not act on it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub form_prot: Option<bool>,
     pub page_borders: Option<Borders>,
     /// Text direction / bidi section.
     pub rtl: bool,
@@ -730,6 +738,9 @@ pub struct SectionProps {
     /// sections turn the page's text area (headers and footers stay horizontal).
     #[serde(skip_serializing_if = "is_horizontal")]
     pub text_direction: crate::props::TextDirection,
+    /// The file states the horizontal direction (`lrTb`) outright; saving writes it back.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub text_direction_set: bool,
     /// Tracked change of the section's properties (`w:sectPrChange`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fmt_change: Option<Box<crate::props::PropChange<SectionProps>>>,
@@ -763,11 +774,14 @@ impl Default for SectionProps {
             title_page: false,
             page_num_start: None,
             page_num_format: NumFormat::Decimal,
+            page_num_set: false,
             line_numbers: None,
             valign: PageVAlign::Top,
+            form_prot: None,
             page_borders: None,
             rtl: false,
             text_direction: crate::props::TextDirection::Horizontal,
+            text_direction_set: false,
             fmt_change: None,
             doc_grid: None,
             footnote_pr: NoteProps::default(),

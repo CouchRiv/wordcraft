@@ -1038,6 +1038,14 @@ pub fn shape_path(kind: ShapeKind, r: kurbo::Rect, corner: Option<u32>) -> BezPa
             kurbo::RoundedRect::from_rect(r, f64::from(radius)).to_path(0.1)
         }
         ShapeKind::Ellipse => kurbo::Ellipse::from_rect(r).to_path(0.1),
+        ShapeKind::FlowchartOr => {
+            let mut p = kurbo::Ellipse::from_rect(r).to_path(0.1);
+            p.move_to((r.x0, cy));
+            p.line_to((r.x1, cy));
+            p.move_to((cx, r.y0));
+            p.line_to((cx, r.y1));
+            p
+        }
         ShapeKind::Triangle => poly(&[(cx, r.y0), (r.x1, r.y1), (r.x0, r.y1)]),
         ShapeKind::RightTriangle => poly(&[(r.x0, r.y0), (r.x1, r.y1), (r.x0, r.y1)]),
         ShapeKind::Diamond => poly(&[(cx, r.y0), (r.x1, cy), (cx, r.y1), (r.x0, cy)]),
@@ -1615,8 +1623,23 @@ mod tests {
     #[test]
     fn shapes_have_paths() {
         let r = kurbo::Rect::new(0.0, 0.0, 10.0, 10.0);
-        for k in [ShapeKind::Rectangle, ShapeKind::Ellipse, ShapeKind::Star, ShapeKind::Heart, ShapeKind::Arrow, ShapeKind::Line] {
+        for k in
+            [ShapeKind::Rectangle, ShapeKind::Ellipse, ShapeKind::FlowchartOr, ShapeKind::Star, ShapeKind::Heart, ShapeKind::Arrow, ShapeKind::Line]
+        {
             assert!(!shape_path(k, r, None).elements().is_empty());
+        }
+    }
+
+    #[test]
+    fn flowchart_or_spokes() {
+        let r = kurbo::Rect::new(0.0, 0.0, 10.0, 10.0);
+        let path = shape_path(ShapeKind::FlowchartOr, r, None);
+        let elements = path.elements();
+        for pair in [
+            [kurbo::PathEl::MoveTo((0.0, 5.0).into()), kurbo::PathEl::LineTo((10.0, 5.0).into())],
+            [kurbo::PathEl::MoveTo((5.0, 0.0).into()), kurbo::PathEl::LineTo((5.0, 10.0).into())],
+        ] {
+            assert!(elements.windows(2).any(|w| w == pair), "missing spoke {pair:?}");
         }
     }
 

@@ -422,6 +422,7 @@ fn shapes_have_paths() {
         ShapeKind::Rectangle,
         ShapeKind::RoundedRectangle,
         ShapeKind::Ellipse,
+        ShapeKind::FlowchartOr,
         ShapeKind::Star,
         ShapeKind::Heart,
         ShapeKind::Arrow,

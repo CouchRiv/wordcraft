@@ -894,10 +894,23 @@ fn copying_an_equation_puts_mathml_on_the_clipboard() {
     run(&mut s, "edit.paste", json!({"text": clip, "html": html}));
     assert_eq!(equations(&s), vec!["y=2x_s".to_string(), "y=2x_s".to_string()]);
 
-    // A copy without an equation carries no HTML.
+    // A copy without an equation carries HTML too (#1523).
     run(&mut s, "select.range", json!({"anchor": {"block": 0, "off": 0}, "focus": {"block": 0, "off": 5}}));
     let r = run(&mut s, "edit.copy", json!({}));
-    assert!(r.get("html").is_none() && s.clipboard_html.is_empty(), "{r}");
+    assert!(r["html"].as_str().is_some_and(|h| h.contains("Speed") && !h.contains("<math")), "{r}");
+}
+
+#[test]
+fn copying_bold_text_puts_html_on_the_clipboard() {
+    // #1523: formatted text reaches other programs as HTML, not only as plain text.
+    let mut s = s();
+    run(&mut s, "document.setText", json!({"text": "plain bold"}));
+    s.doc.format_range(&Pos::body(0, 6), &Pos::body(0, 10), &|c| c.bold = Some(true)).unwrap();
+    run(&mut s, "select.all", json!({}));
+    let r = run(&mut s, "edit.copy", json!({}));
+    let html = r["html"].as_str().unwrap_or_default().to_string();
+    assert!(html.contains("<strong>bold</strong>"), "{html}");
+    assert_eq!(s.clipboard_html, html);
 }
 
 #[test]
@@ -2316,6 +2329,79 @@ fn imported_range_toc_is_refreshed_in_place() {
         assert_eq!(text(&s), before);
         assert_eq!(s.doc.field_ranges(StoryRef::Body).len(), 1, "undo brings the imported range back");
     }
+}
+
+/// A TOC as Word and other writers lay it out (a TOC heading, then the field in paragraphs of its
+/// own), styles with a number tab stop and a hanging indent, and a wider last section with the
+/// caret in it (Select All, Update Field): no blank line between the heading and the entries,
+/// and every page number at the TOC section's right margin, after its leader: short entries,
+/// entries that wrap, and level-one entries whose style has no stops of its own.
+#[test]
+fn toc_page_numbers_reach_the_right_margin() {
+    use wordcraft_doc::para::InlineObject;
+    use wordcraft_doc::props::{CharProps, TabAlign, TabLeader, TabStop};
+    let long = "A deliberately long section title that does not fit on one line of the table of contents and wraps onto a second line";
+    let mut d = wordcraft_doc::Document::from_text(&format!("Contents\n\nNo entries.\n\nShort\n{long}\nTop\nAppendix"));
+    {
+        let toc2 = d.styles.get_mut("TOC2").unwrap();
+        toc2.para.tabs = Some(vec![
+            TabStop { pos: 77.0, align: TabAlign::Left, leader: TabLeader::None },
+            TabStop { pos: 467.2, align: TabAlign::Right, leader: TabLeader::Dot },
+        ]);
+        toc2.para.indent_left = Some(36.9);
+        toc2.para.indent_first = Some(-22.7);
+        let p = d.para_mut(StoryRef::Body, &wordcraft_doc::Path::top(1)).unwrap();
+        p.insert_object(0, InlineObject::FieldStart { instr: r#"TOC \o "1-3" \h \z \u"#.into(), locked: false }, &CharProps::default()).unwrap();
+        let p = d.para_mut(StoryRef::Body, &wordcraft_doc::Path::top(3)).unwrap();
+        p.insert_object(0, InlineObject::FieldEnd, &CharProps::default()).unwrap();
+    }
+    let mut s = Session::new(d);
+    run(&mut s, "caret.set", json!({"pos": Pos::body(0, 0)}));
+    run(&mut s, "styles.apply", json!({"style": "TOC Heading"}));
+    run(&mut s, "caret.set", json!({"pos": Pos::body(1, 0)}));
+    run(&mut s, "styles.apply", json!({"style": "TOC 1"}));
+    for (i, style) in [(4, "Heading 2"), (5, "Heading 2"), (6, "Heading 1"), (7, "Heading 1")] {
+        run(&mut s, "caret.set", json!({"pos": Pos::body(i, 0)}));
+        run(&mut s, "styles.apply", json!({"style": style}));
+    }
+    run(&mut s, "caret.set", json!({"pos": Pos::body(7, 0)}));
+    run(&mut s, "layout.break", json!({"kind": "nextPage"}));
+    run(&mut s, "caret.docEnd", json!({}));
+    run(&mut s, "layout.orientation", json!({"value": "landscape"}));
+    // Through DOCX, as an imported file is.
+    let bytes = wordcraft_docx::write(&s.doc).unwrap();
+    s = Session::new(wordcraft_docx::read(&bytes).unwrap());
+    run(&mut s, "select.all", json!({}));
+    run(&mut s, "references.updateFields", json!({}));
+
+    let body: Vec<(String, String)> =
+        s.doc.body.iter().filter_map(|b| b.as_para()).map(|p| (p.props.style.clone().unwrap_or_default(), p.plain_text())).collect();
+    assert_eq!(body[0], ("TOCHeading".into(), "Contents".into()), "{body:?}");
+    assert!(body[1].0.starts_with("TOC") && !body[1].1.is_empty(), "the first entry right under the heading: {body:?}");
+    let toc_width = s.doc.sections()[0].1.text_width();
+    let margin = s.doc.sections()[0].1.margin_left;
+    let l = s.layout();
+    for (i, b) in s.doc.body.iter().enumerate() {
+        let Some(p) = b.as_para() else { continue };
+        if !p.props.style.as_deref().is_some_and(|st| st.starts_with("TOC") && st != "TOCHeading") {
+            continue;
+        }
+        let page = p.text.rfind('\t').unwrap() + 1;
+        let end = l.caret(&Pos::body(i, p.len())).unwrap();
+        let number = l.caret(&Pos::body(i, page)).unwrap();
+        assert!(
+            (end.x - (margin + toc_width)).abs() < 2.0,
+            "{:?}: page number ends at {} (right margin {})",
+            p.plain_text(),
+            end.x,
+            margin + toc_width
+        );
+        assert!(end.page == number.page && number.x > margin + toc_width - 30.0, "{:?}: page number at {}", p.plain_text(), number.x);
+    }
+    // Updating again keeps the same table.
+    let before = text(&s);
+    run(&mut s, "references.updateToc", json!({}));
+    assert_eq!(text(&s), before);
 }
 
 #[test]
@@ -5934,6 +6020,35 @@ fn forced_tracking_records_revisions_without_touching_the_setting() {
     // Accept All makes the agent's change real.
     run(&mut s, "review.acceptAll", json!({}));
     assert_eq!(text(&s), "Kilns fire stoneware. More.");
+}
+
+/// Change Picture must keep the replacement's own format: the part's name and content type
+/// come from the extension, so a JPEG stored as `imageN.png` saves declared `image/png` (Word
+/// and LibreOffice then show a broken picture).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn picture_change_keeps_the_replacement_format() {
+    let dir = scratch_dir("picture-change-format");
+    let first = dir.join("first.png");
+    std::fs::write(&first, tiny_png()).unwrap();
+    let mut jpeg = Vec::new();
+    image::RgbImage::from_pixel(2, 2, image::Rgb([30, 30, 200])).write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg).unwrap();
+    let second = dir.join("second.jpg");
+    std::fs::write(&second, &jpeg).unwrap();
+
+    let mut s = Session::new(wordcraft_doc::Document::new());
+    run(&mut s, "insert.picture", json!({"path": first.to_string_lossy()}));
+    run(&mut s, "picture.change", json!({"path": second.to_string_lossy()}));
+    let mut media = String::new();
+    s.doc.objects_in_reading_order(&mut |o| {
+        if let wordcraft_doc::para::InlineObject::Image { media: m, .. } = o {
+            media = m.clone();
+        }
+    });
+    assert!(media.ends_with(".jpeg") || media.ends_with(".jpg"), "the JPEG keeps its format: {media}");
+    let back = wordcraft_docx::read(&wordcraft_docx::write(&s.doc).unwrap()).unwrap();
+    assert_eq!(back.media.get(&media).map(|b| b.as_slice()), Some(jpeg.as_slice()), "the saved part is the JPEG");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

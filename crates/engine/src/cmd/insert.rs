@@ -222,6 +222,20 @@ pub(crate) fn picture(s: &mut Session, v: &Value) -> CmdResult {
     place_picture(s, bytes, p::f32(v, "width"), p::str(v, "alt").unwrap_or(""))
 }
 
+/// The media extension of an encoded image by its magic bytes, as `image_size` accepted it
+/// (TIFF included: the `image` crate decodes it).
+pub(crate) fn image_ext(bytes: &[u8]) -> &'static str {
+    match bytes.get(..4) {
+        Some([0x89, b'P', b'N', b'G']) => "png",
+        Some([0xFF, 0xD8, ..]) => "jpeg",
+        Some([b'G', b'I', b'F', _]) => "gif",
+        Some([b'R', b'I', b'F', b'F']) => "webp",
+        Some([b'B', b'M', ..]) => "bmp",
+        Some([b'I', b'I', 0x2A, 0x00]) | Some([b'M', b'M', 0x00, 0x2A]) => "tiff",
+        _ => "png",
+    }
+}
+
 /// Insert an encoded image at the selection as an inline picture, `width` points wide (default:
 /// its natural size at 96 ppi), never wider than the text column. The caret ends after it, so a
 /// script's next typing doesn't replace it (#965); Picture Format commands still act on it. The
@@ -232,14 +246,7 @@ fn place_picture(s: &mut Session, bytes: Vec<u8>, width: Option<f32>, alt: &str)
     }
     // Natural size: pixels at 96 ppi, or a metafile's own frame (WMF, EMF: #802).
     let (natural_w, natural_h, ext) = if let Some((pw, ph)) = wordcraft_render::image_size(&bytes) {
-        let ext = match bytes.get(..4) {
-            Some([0x89, b'P', b'N', b'G']) => "png",
-            Some([0xFF, 0xD8, ..]) => "jpeg",
-            Some([b'G', b'I', b'F', _]) => "gif",
-            Some([b'R', b'I', b'F', b'F']) => "webp",
-            Some([b'B', b'M', ..]) => "bmp",
-            _ => "png",
-        };
+        let ext = image_ext(&bytes);
         (pw as f32 * 0.75, ph as f32 * 0.75, ext)
     } else if let Some(size) = wordcraft_render::metafile_size(&bytes) {
         size

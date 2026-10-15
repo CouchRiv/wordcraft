@@ -464,6 +464,9 @@ fn tblpr_inner(w: &mut W, t: &TableProps) {
 
 /// `w:trPr` (when the row has any), with a tracked change last as for [`tblpr`].
 pub fn trpr(w: &mut W, r: &RowProps, change: Option<&ChangeAttrs>) {
+    if let Some(x) = &r.exceptions {
+        tblprex(w, x);
+    }
     let change = change.zip(r.fmt_change.as_ref());
     let gaps = r.grid_before > 0 || r.grid_after > 0 || r.w_before.is_some() || r.w_after.is_some();
     if r.height.is_none() && !r.header && !r.cant_split && !gaps && change.is_none() {
@@ -475,6 +478,35 @@ pub fn trpr(w: &mut W, r: &RowProps, change: Option<&ChangeAttrs>) {
         change_el(w, "w:trPrChange", "w:trPr", a, |w| trpr_inner(w, &ch.old));
     }
     w.close("w:trPr");
+}
+
+/// `w:tblPrEx`: only the properties the row overrides (it takes no style, float or look).
+fn tblprex(w: &mut W, t: &TableProps) {
+    w.open("w:tblPrEx", &[]);
+    if let Some(p) = t.width_pct {
+        w.empty("w:tblW", &[("w:w", &n(round(p.clamp(0.0, 1000.0) * 50.0))), ("w:type", "pct")]);
+    } else if let Some(v) = t.width {
+        w.empty("w:tblW", &[("w:w", &twips(v.max(0.0))), ("w:type", "dxa")]);
+    }
+    if let Some(a) = t.align {
+        w.val("w:jc", align_val(if a == Align::Justify || a == Align::Distribute { Align::Left } else { a }));
+    }
+    if let Some(i) = t.indent {
+        w.empty("w:tblInd", &[("w:w", &twips(i)), ("w:type", "dxa")]);
+    }
+    if let Some(b) = &t.borders {
+        borders(w, "w:tblBorders", b, Some("w:insideH"), &[]);
+    }
+    if let Some(s) = t.shading {
+        w.empty("w:shd", &[("w:val", "clear"), ("w:color", "auto"), ("w:fill", &s.hex())]);
+    }
+    if t.fixed {
+        w.empty("w:tblLayout", &[("w:type", "fixed")]);
+    }
+    if let Some(m) = &t.cell_margins {
+        margins(w, "w:tblCellMar", m);
+    }
+    w.close("w:tblPrEx");
 }
 
 fn trpr_inner(w: &mut W, r: &RowProps) {
@@ -542,7 +574,7 @@ fn tcpr_inner(w: &mut W, c: &CellProps) {
     if let Some(m) = &c.margins {
         margins(w, "w:tcMar", m);
     }
-    if c.text_direction.is_turned() {
+    if c.text_direction.is_turned() || c.text_direction_set {
         w.val("w:textDirection", c.text_direction.ooxml());
     }
     match c.valign {

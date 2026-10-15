@@ -1837,6 +1837,51 @@ fn text_wraps_around_square_float() {
 }
 
 #[test]
+fn freeform_arrow_end_draws_at_the_last_point() {
+    use std::sync::Arc;
+    use wordcraft_doc::connector::ShapeExtra;
+    use wordcraft_doc::freeform::{FreePath, Freeform};
+    use wordcraft_doc::graphic::PathSeg;
+    use wordcraft_doc::para::{Float, ShapeKind};
+    use wordcraft_doc::props::Rgb;
+
+    let shape = InlineObject::Shape {
+        kind: ShapeKind::Freeform,
+        w: 60.0,
+        h: 40.0,
+        fill: None,
+        stroke: Some(Rgb::BLACK),
+        stroke_width: 1.0,
+        float: Float::default(),
+        story: None,
+        freeform: Some(Arc::new(Freeform {
+            w: 60.0,
+            h: 40.0,
+            paths: vec![FreePath { pts: vec![[0.0, 40.0], [60.0, 0.0]], closed: false }],
+            ..Default::default()
+        })),
+        effects: Default::default(),
+        extra: ShapeExtra { arrow_end: true, ..Default::default() },
+    };
+    let mut doc = Document::from_text("Scan");
+    doc.insert_object(&Pos::body(0, 0), shape, &Default::default()).unwrap();
+
+    let draws = flat(display::page_display(&doc, &lay(&doc).pages[0], &Default::default()));
+    let endpoint = draws.iter().find_map(|draw| match draw {
+        display::Draw::Ink { pts, color: Rgb::BLACK, .. } => pts.last().copied(),
+        _ => None,
+    });
+    let arrow_tip = draws.iter().find_map(|draw| match draw {
+        display::Draw::Path { fill: Some(Rgb::BLACK), segs, .. } if segs.len() == 4 => match segs.first() {
+            Some(PathSeg::Move(x, y)) => Some((*x, *y)),
+            _ => None,
+        },
+        _ => None,
+    });
+    assert_eq!(arrow_tip, endpoint, "the arrowhead tip meets the custom path's final point");
+}
+
+#[test]
 fn hidden_drawings_are_neither_drawn_nor_take_room() {
     // A hidden floating shape (VML `visibility:hidden`, `wp:docPr/@hidden`): no wrap area, nothing
     // drawn, as in Word for Windows. A hidden inline one takes no room in its line.
@@ -2427,6 +2472,32 @@ fn repeated_header_is_followed_by_the_next_row_even_when_it_overflows() {
     let pages = rows_per_page(t);
     assert!(pages.len() >= 2, "{pages:?}");
     assert!(pages.iter().all(|p| p.first() == Some(&0)), "{pages:?}");
+}
+
+#[test]
+fn repeated_header_moves_with_the_first_row_that_does_not_fit() {
+    // A paragraph that leaves `room` points of the letter page's 648 pt body, then a table with a
+    // 20 pt header row and 40 pt one-line rows. Returns the table rows on each page.
+    let rows_per_page = |room: f32| -> Vec<Vec<usize>> {
+        let mut d = Document::from_text("Text above the table");
+        d.para_mut(StoryRef::Body, &Path::top(0)).unwrap().props.space_after = Some(648.0 - room - 14.0);
+        let mut t = Table::new(3, 1, 468.0);
+        t.rows[0].props.header = true;
+        for (row, h) in t.rows.iter_mut().zip([20.0, 40.0, 40.0]) {
+            row.props.height = Some(h);
+            row.props.height_rule = wordcraft_doc::props::HeightRule::AtLeast;
+        }
+        d.insert_block(StoryRef::Body, &Path::top(1), wordcraft_doc::Block::Table(t)).unwrap();
+        lay(&d)
+            .pages
+            .iter()
+            .map(|p| p.items.iter().filter_map(|i| if let Placed::Cell { row, cell: 0, .. } = i { Some(*row) } else { None }).collect())
+            .collect()
+    };
+    // Header and first row fit: the table starts on the first page.
+    assert_eq!(rows_per_page(80.0)[0], vec![0, 1]);
+    // Only the header fits: it goes to the next page with the first row instead of staying alone.
+    assert_eq!(rows_per_page(40.0), vec![vec![], vec![0, 1, 2]]);
 }
 
 /// A drop-cap paragraph in a font larger than 1000 pt used to panic in layout (`clamp` with min > max).
@@ -3438,6 +3509,21 @@ fn float_follows_its_paragraph_to_the_next_page() {
     assert!(para.lines[0].left >= 144.0, "text wraps beside it: {}", para.lines[0].left);
 }
 
+/// A floating object belongs to its paragraph, not to the line holding its anchor: Word draws
+/// it on the page the paragraph starts on. A Word cover page is one paragraph holding a page
+/// break and then the page-anchored text box with the title; the box stays on the cover.
+#[test]
+fn a_float_anchored_after_a_page_break_stays_on_its_paragraph_s_first_page() {
+    let mut d = Document::from_text(&format!("{}\nAfter the cover", wordcraft_doc::para::PAGE_BREAK));
+    d.insert_object(&Pos::body(0, 1), rect_shape(200.0, 100.0, page_float(100.0, 300.0)), &Default::default()).unwrap();
+    let l = lay(&d);
+    assert_eq!(l.pages.len(), 2);
+    let on_cover = shapes(&l.pages[0].items);
+    assert_eq!(on_cover.len(), 1, "the shape is drawn on the cover: {on_cover:?}");
+    assert!((on_cover[0].y - 300.0).abs() < 0.5, "{:?}", on_cover[0]);
+    assert!(shapes(&l.pages[1].items).is_empty(), "and not again on page two");
+}
+
 #[test]
 fn floats_in_headers_and_table_cells_are_drawn() {
     use wordcraft_doc::para::{Anchor, Float, Wrap};
@@ -3666,6 +3752,37 @@ fn floating_tables_take_no_room_and_text_wraps_beside_them() {
     // The paragraph doesn't wait below them: it runs beside the narrow table, level with it.
     assert!((by - ny).abs() < 2.0, "body at {by}, narrow table text at {ny}");
     assert!(bx + bleft > nx + 200.0, "body text at {}, right of the narrow table", bx + bleft);
+}
+
+#[test]
+fn a_floating_table_ignores_a_paragraphs_empty_lines() {
+    use wordcraft_doc::para::Anchor;
+    use wordcraft_doc::props::TableFloat;
+
+    let mut doc = Document::from_text(&[""; 9].join("\n"));
+    doc.body.push(wordcraft_doc::para_block(wordcraft_doc::Paragraph::with_text("Visible\n\n\n", Default::default())));
+    doc.body.extend((0..14).map(|_| wordcraft_doc::para_block(wordcraft_doc::Paragraph::new())));
+    let mut table = Table::new(12, 1, 300.0);
+    for (i, row) in table.rows.iter_mut().enumerate() {
+        row.cells[0].blocks = vec![wordcraft_doc::para_block(wordcraft_doc::Paragraph::with_text(&format!("Approval {i}"), Default::default()))];
+    }
+    table.props.float = Some(TableFloat { h_rel: Anchor::Margin, v_rel: Anchor::Margin, x: 100.0, y: 50.0, ..Default::default() });
+    let at = doc.body.len();
+    doc.insert_block(StoryRef::Body, &Path::top(at), wordcraft_doc::Block::Table(table)).unwrap();
+
+    let layout = lay(&doc);
+    let table_pages: Vec<usize> = layout
+        .pages
+        .iter()
+        .enumerate()
+        .flat_map(|(page, p)| {
+            p.items.iter().filter_map(move |item| match item {
+                Placed::Lines { story: StoryRef::Body, path, .. } if path.0.len() > 1 => Some(page),
+                _ => None,
+            })
+        })
+        .collect();
+    assert!(!table_pages.is_empty() && table_pages.iter().all(|page| *page == 0), "table rows on pages {table_pages:?}");
 }
 
 #[test]

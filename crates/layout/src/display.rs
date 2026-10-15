@@ -1367,6 +1367,12 @@ fn shape_draws(
                 if closed && let Some(first) = pts.first().copied() {
                     pts.push(first);
                 }
+                if !closed
+                    && extra.arrow_end
+                    && let Some(arrow) = path_arrowhead(&pts, color, width)
+                {
+                    out.push(arrow);
+                }
                 out.push(Draw::Ink { pts, color, width: width.max(0.25), alpha: f.alpha });
             }
             continue;
@@ -1379,7 +1385,34 @@ fn shape_draws(
             segs.push(PathSeg::Close);
         }
         out.push(Draw::Path { segs, fill: if closed { fill } else { None }, stroke, stroke_width: width });
+        if !closed
+            && extra.arrow_end
+            && let Some(color) = stroke
+        {
+            let points: Vec<(f32, f32)> = pts.iter().map(|[x, y]| (*x, *y)).collect();
+            if let Some(arrow) = path_arrowhead(&points, color, width) {
+                out.push(arrow);
+            }
+        }
     }
+}
+
+fn path_arrowhead(points: &[(f32, f32)], color: Rgb, stroke_width: f32) -> Option<Draw> {
+    let tip = *points.last()?;
+    let (prev_x, prev_y) = points.iter().rev().skip(1).copied().find(|p| *p != tip)?;
+    let dx = tip.0 - prev_x;
+    let dy = tip.1 - prev_y;
+    let length = dx.hypot(dy);
+    if !length.is_finite() || length <= f32::EPSILON {
+        return None;
+    }
+    let (dx, dy) = (dx / length, dy / length);
+    let width = if stroke_width.is_finite() { stroke_width.clamp(0.25, 200.0) } else { 0.75 };
+    let len = (width * 3.5).max(7.0);
+    let (bx, by) = (tip.0 - dx * len, tip.1 - dy * len);
+    let (nx, ny) = (-dy * len * 0.45, dx * len * 0.45);
+    let segs = vec![PathSeg::Move(tip.0, tip.1), PathSeg::Line(bx + nx, by + ny), PathSeg::Line(bx - nx, by - ny), PathSeg::Close];
+    Some(Draw::Path { segs, fill: Some(color), stroke: None, stroke_width: 0.0 })
 }
 
 /// A line or connector at `rect` (its unflipped frame: flips are the frame's turn), with its

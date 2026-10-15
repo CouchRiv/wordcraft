@@ -2914,7 +2914,17 @@ fn place_objects(
     let Some(fl) = pl.lines.get(l0) else { return (behind, front) };
     // Objects left out of the layout (hidden, or deleted in the final text) aren't placed.
     let left_out = left_out_objects(ctx.doc, p, at.table_chr, ctx.opts.show_hidden, ctx.hide_deleted);
-    for li in l0..l1 {
+    // A floating object belongs to its paragraph, not to its line: Word puts it on the page the
+    // paragraph starts on (a cover page is a paragraph holding a page break and then the text
+    // box with the title; the box stays on the cover). So the paragraph's first piece places
+    // every floating object, whichever of its lines holds the anchor, and later pieces none;
+    // inline objects go with their own line.
+    let first = l0 == 0;
+    for li in 0..pl.lines.len() {
+        let in_piece = (l0..l1).contains(&li);
+        if !in_piece && !first {
+            continue;
+        }
         let Some(line) = pl.lines.get(li) else { continue };
         for k in line.c0..line.c1 {
             let Some(c) = pl.clusters.get(k) else { continue };
@@ -2925,6 +2935,9 @@ fn place_objects(
             let Some(obj) = p.objects.get(oi) else { continue };
             let Some((w, h, float)) = obj.frame() else { continue };
             let floating = float.wrap != Wrap::Inline;
+            if if floating { !first } else { !in_piece } {
+                continue;
+            }
             let rect = if floating {
                 floats.get(&oi).copied().unwrap_or_else(|| float_rect(at.page, at.col, at.para_y, w, h, float))
             } else {
@@ -3665,6 +3678,19 @@ fn place_table(ctx: &mut Ctx, pb: &mut PageBuilder, t: &wordcraft_doc::Table, bl
         pb.y += row.height;
         pb.content_bottom = pb.content_bottom.max(pb.y);
     };
+    // Like Word, repeated header rows don't stay alone at the bottom of a page: when the first row
+    // after them can't start under them there, the table starts on the next page.
+    let first = header_rows.len();
+    if !header_rows.is_empty()
+        && !pb.at_top()
+        && let Some(row) = tl.rows.get(first)
+    {
+        let room = pb.bottom - pb.y - tl.rows.iter().take(first).map(|r| r.height).sum::<f32>();
+        let splittable = !t.rows.get(first).is_some_and(|r| r.props.cant_split);
+        if row.height > room + 0.01 && !(splittable && table::split_row(row, room).is_some()) {
+            pb.advance(block, body_top);
+        }
+    }
     for (ri, row) in tl.rows.iter().enumerate() {
         // Word never splits a row of an exact height: it moves on whole.
         let splittable = !header_rows.contains(&ri)
@@ -3772,7 +3798,7 @@ fn place_floating_table(pb: &mut PageBuilder, tl: &table::TableLayout, f: &Table
         let moves = if f.v_rel == Anchor::Paragraph {
             r.bottom() > pb.bottom + 0.01
         } else {
-            let covers_text = r.y < pb.y - 0.01 && r.bottom() > pb.top + 0.01 && r.x < pb.col_x() + pb.col_w() && r.right() > pb.col_x();
+            let covers_text = pb.page().is_some_and(|page| page.items.iter().any(|item| placed_intersects(item, &r)));
             covers_text && pb.y + h > pb.bottom + 0.01
         };
         if attempt == 0 && moves && !pb.at_top() {
@@ -3794,6 +3820,40 @@ fn place_floating_table(pb: &mut PageBuilder, tl: &table::TableLayout, f: &Table
         pb.excl.push((area, false, None, WrapText::BothSides));
         pb.float_tables.push(area);
         return;
+    }
+}
+
+fn placed_intersects(item: &Placed, rect: &Rect) -> bool {
+    match item {
+        Placed::Lines { para, l0, l1, x, y, .. } => para.lines.get(*l0..*l1).is_some_and(|lines| {
+            lines.iter().enumerate().any(|(offset, line)| {
+                if para.label.is_some() && *l0 + offset == 0 {
+                    return Rect::new(x + line.left, y + line.top, line.right - line.left, line.height).intersects(rect);
+                }
+                para.clusters.get(line.c0..line.c1).is_some_and(|clusters| {
+                    clusters.iter().enumerate().any(|(index, cluster)| {
+                        if !matches!(
+                            cluster.kind,
+                            crate::para::ClKind::Text | crate::para::ClKind::Space | crate::para::ClKind::Tab | crate::para::ClKind::Object(_)
+                        ) {
+                            return false;
+                        }
+                        let ci = line.c0 + index;
+                        let Some(left) = line.cl_left(ci) else { return false };
+                        let Some(right) = line.cl_right(ci) else { return false };
+                        Rect::new(x + left, y + line.top, right - left, line.height).intersects(rect)
+                    })
+                })
+            })
+        }),
+        Placed::Fill { rect: bounds, .. }
+        | Placed::Image { rect: bounds, .. }
+        | Placed::Shape { rect: bounds, .. }
+        | Placed::Graphic { rect: bounds, .. }
+        | Placed::Cell { rect: bounds, .. }
+        | Placed::Object { rect: bounds, .. }
+        | Placed::Clip { rect: bounds, .. } => bounds.intersects(rect),
+        Placed::Rule { x0, y0, x1, y1, .. } => Rect::new(x0.min(*x1), y0.min(*y1), (x1 - x0).abs(), (y1 - y0).abs()).intersects(rect),
     }
 }
 
