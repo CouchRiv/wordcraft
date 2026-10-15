@@ -1,0 +1,142 @@
+{
+  "capture": "Real egui application UI, real document commands, deterministic locally scripted agent replies; no live LLM call.",
+  "fixture": "Fictional route pilot / region table only.",
+  "editing": "Fixed crop + resize + captions, no content tweening.",
+  "review_branches": "Keep and Undo alternatives explicitly captioned.",
+  "coverage": {
+    "all_apps": [
+      "quick action menu shown; selecting preset does not send; instruction remains editable",
+      "Conversation expands with prior instruction/answer and current instruction; true scrolling where needed",
+      "signed comments preserve both instructions and answers",
+      "selection",
+      "Ask Agent bubble",
+      "real agent dropdown with Claude Code and Codex",
+      "instruction",
+      "working",
+      "document mutation",
+      "response",
+      "Keep plus signed comments retained after close",
+      "follow-up in same thread",
+      "Undo clicked, original restored"
+    ],
+    "wordcraft": [
+      "tracked edits"
+    ],
+    "gridcraft": [
+      "total SUM row"
+    ],
+    "deckcraft": [
+      "real bullets",
+      "nested signed comment reply"
+    ],
+    "pdfcraft": [
+      "real highlights",
+      "HELD error verified by protocol only, no visible badge claimed"
+    ]
+  },
+  "outputs": [
+    {
+      "app": "wordcraft",
+      "gif": "wordcraft.gif",
+      "gif_bytes": 1211417,
+      "gif_duration_ms": 62160,
+      "gif_sha256": "1296b2b890669e429aa6bb9411272117617140a5c49346001c8f23ec488cd690",
+      "mp4": "wordcraft.mp4",
+      "mp4_sha256": "d74d00df5e32c9d08a480c3d6dd8675f40ea1896d683a118e8ae9625b1695ed2",
+      "probe": {
+        "programs": [],
+        "stream_groups": [],
+        "streams": [
+          {
+            "codec_name": "h264",
+            "width": 1280,
+            "height": 900,
+            "r_frame_rate": "30/1"
+          }
+        ],
+        "format": {
+          "duration": "62.166667"
+        }
+      }
+    },
+    {
+      "app": "gridcraft",
+      "gif": "gridcraft.gif",
+      "gif_bytes": 795257,
+      "gif_duration_ms": 54960,
+      "gif_sha256": "bcd13bc7a6e638a70034e79812241b0ce528be2c2e8e6052033a2909a5d5452a",
+      "mp4": "gridcraft.mp4",
+      "mp4_sha256": "a47b3fb49fb5feb1792ce96f0b27b1ccc94c4f72f2f2bf5ac2e02c92fb77e039",
+      "probe": {
+        "programs": [],
+        "stream_groups": [],
+        "streams": [
+          {
+            "codec_name": "h264",
+            "width": 1280,
+            "height": 900,
+            "r_frame_rate": "30/1"
+          }
+        ],
+        "format": {
+          "duration": "54.966667"
+        }
+      }
+    },
+    {
+      "app": "deckcraft",
+      "gif": "deckcraft.gif",
+      "gif_bytes": 629695,
+      "gif_duration_ms": 56960,
+      "gif_sha256": "012341c2973f530d9db8f9d10e6f7027e6035dcb319398dac856d9bf9317f2bc",
+      "mp4": "deckcraft.mp4",
+      "mp4_sha256": "62a33e47530fa3cb79c214c861eb5ae9ce212641b36e60a39e6f29f1d51472e2",
+      "probe": {
+        "programs": [],
+        "stream_groups": [],
+        "streams": [
+          {
+            "codec_name": "h264",
+            "width": 1280,
+            "height": 900,
+            "r_frame_rate": "30/1"
+          }
+        ],
+        "format": {
+          "duration": "56.966667"
+        }
+      }
+    },
+    {
+      "app": "pdfcraft",
+      "gif": "pdfcraft.gif",
+      "gif_bytes": 845779,
+      "gif_duration_ms": 63360,
+      "gif_sha256": "91c0fcf56df3830df053991aa3b4c0b0346850b75ed0195aee0e93a0104b966c",
+      "mp4": "pdfcraft.mp4",
+      "mp4_sha256": "221f6ed93cf6de34a776b6ba52f9131c9c624e936dca4efb8a2e5570efba81a8",
+      "probe": {
+        "programs": [],
+        "stream_groups": [],
+        "streams": [
+          {
+            "codec_name": "h264",
+            "width": 1280,
+            "height": 900,
+            "r_frame_rate": "30/1"
+          }
+        ],
+        "format": {
+          "duration": "63.366667"
+        }
+      }
+    }
+  ],
+  "source_code_commits": {
+    "wordcraft": "9bb3e5badbac8d5156ea339d28ae3ff647d6a6ef",
+    "gridcraft": "7d3074ac2068ba9ea99d198c0d3c205f681adba6",
+    "deckcraft": "804e2308d1a11be80668d51c39da64374195863f",
+    "pdfcraft": "68178cd586bc6fae2493508d6577397307edf302",
+    "craft-libs": "313b5d81e60301a43f181c3316663920fd3c5245"
+  }
+}
