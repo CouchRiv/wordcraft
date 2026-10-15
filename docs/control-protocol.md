@@ -186,7 +186,7 @@ Quick actions also include **Final polish** under More (grammar, clarity and con
 
 ### Common Ask Agent contract
 
-See [the common contract](ask-agent-contract.md). The selection transport remains additive:
+The selection transport remains additive:
 `agent.listen` uses `timeoutMs`, and `agent.reply` uses `text` and `done`. Requests now
 also expose `status` (`pending` / `working` / `ready` / `failed` / `cancelled`), explicit
 `scope`, top-level `language`, `author`, and opaque `document.id` / `document.revision`.

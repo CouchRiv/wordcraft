@@ -224,8 +224,7 @@ the distance from the text). Missing fields are `none`, 0, no colour and 0, so a
 
 ### Ask Agent compatibility and ownership
 
-[Common contract](ask-agent-contract.md): keep `timeout_s`, `text`, `done`, and direct
-request results. `wait_for_request` rejects negative or incorrectly typed timeouts,
+The tools keep `timeout_s`, `text`, `done`, and direct request results. `wait_for_request` rejects negative or incorrectly typed timeouts,
 uses integral milliseconds (floor), and caps waits at 60 seconds. A claim is tied to the
 bridge connection; sharing a display name does not grant another client ownership.
 After an ambiguous transport failure, reconnect and inspect instead of replaying edits.
