@@ -1,0 +1,1 @@
+Contributor-original captures of wordcraft and fictional Route pilot fixture. Author: CouchRiv. License: MIT OR Apache-2.0. Real application renderer and editing commands; agent replies scripted, not live model calls. Keep and Undo shown as alternative branches.
