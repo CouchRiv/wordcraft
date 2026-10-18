@@ -69,6 +69,11 @@ pub fn chip(ctx: &egui::Context, anchor: Rect) -> bool {
 /// follow-up field.
 pub fn bubble(ctx: &egui::Context, anchor: Rect, view: &View, draft: &mut String, picked: &mut Option<String>) -> Option<Action> {
     let mut action = None;
+    // True on the first pass the bubble shows after at least one pass without it.
+    let (id, pass) = (egui::Id::new("ask_agent_bubble_pass"), ctx.cumulative_pass_nr());
+    let last = ctx.data(|d| d.get_temp::<u64>(id));
+    ctx.data_mut(|d| d.insert_temp(id, pass));
+    let opened = last.is_none_or(|last| last + 1 < pass);
     egui::Area::new("ask_agent_bubble".into()).order(egui::Order::Foreground).fixed_pos(origin(ctx, anchor, WIDTH + 40.0)).constrain(true).show(
         ctx,
         |ui| {
@@ -159,9 +164,12 @@ pub fn bubble(ctx: &egui::Context, anchor: Rect, view: &View, draft: &mut String
                             .hint_text(hint)
                             .desired_rows(3)
                             .desired_width(f32::INFINITY)
-                            .margin(egui::Margin::symmetric(8, 6)),
+                            .margin(egui::Margin::symmetric(8, 6))
+                            // Shift+Enter makes a new line; Enter alone sends, below.
+                            .return_key(egui::KeyboardShortcut::new(egui::Modifiers::SHIFT, Key::Enter)),
                     );
-                    if status.is_none() && !field.has_focus() && draft.is_empty() {
+                    // Focus the field once, when the bubble opens, so Tab can then reach the other controls.
+                    if status.is_none() && opened {
                         field.request_focus();
                     }
                     let enter = field.has_focus() && ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift);
