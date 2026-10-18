@@ -43,8 +43,12 @@ fn ok(v: Value) -> Outcome {
 }
 fn err(e: impl std::fmt::Display) -> Outcome {
     let message = e.to_string();
-    let code = message.split(":").next().filter(|c| c.chars().all(|ch| ch.is_ascii_uppercase() || ch == '_')).unwrap_or("INVALID_PARAMS");
-    Outcome::Done(json!({"ok": false, "error": message, "errorCode": code}))
+    match message.split_once(':') {
+        Some((code, rest)) if !code.is_empty() && code.chars().all(|ch| ch.is_ascii_uppercase() || ch == '_') => {
+            Outcome::Done(json!({"ok": false, "error": rest.trim_start(), "errorCode": code}))
+        }
+        _ => Outcome::Done(json!({"ok": false, "error": message})),
+    }
 }
 
 pub fn inspect(app: &mut WordApp, ctx: &egui::Context) -> Value {
@@ -331,4 +335,22 @@ pub fn save_screenshot(image: &egui::ColorImage, path: Option<&str>) -> Value {
         }
     }
     json!({"ok": true, "result": {"path": path, "width": w, "height": h}})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn err_strips_code_prefix_and_emits_error_code_only_when_uppercase() {
+        let Outcome::Done(v1) = err("NO_REQUEST: no Ask Agent request 5") else { panic!() };
+        assert_eq!(v1["ok"], false);
+        assert_eq!(v1["error"], "no Ask Agent request 5");
+        assert_eq!(v1["errorCode"], "NO_REQUEST");
+
+        let Outcome::Done(v2) = err("no document is open") else { panic!() };
+        assert_eq!(v2["ok"], false);
+        assert_eq!(v2["error"], "no document is open");
+        assert!(v2.get("errorCode").is_none());
+    }
 }

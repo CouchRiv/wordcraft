@@ -79,15 +79,22 @@ pub fn as_agent(
     let name = hub.snapshot(id).and_then(|s| s.agent).unwrap_or_default();
     let depth = app.session.undo_depth();
     let mine = app.ask_agent.open.as_mut().filter(|o| o.id == Some(id));
-    match mine.as_ref().and_then(|o| o.edited_from) {
-        Some(_) => app.session.join_next_undo(),
-        None => mine.into_iter().for_each(|o| o.edited_from = Some(depth)),
+    let from = mine.as_ref().and_then(|o| o.edited_from);
+    if from.is_some_and(|f| depth == f + 1) {
+        app.session.join_next_undo();
     }
     let author = std::mem::replace(&mut app.session.author, format!("Agent ({name})"));
     app.ask_agent.agent_turn = true;
     let result = run(app);
     app.ask_agent.agent_turn = false;
     app.session.author = author;
+    if from.is_none()
+        && result.is_ok()
+        && app.session.undo_depth() > depth
+        && let Some(o) = app.ask_agent.open.as_mut().filter(|o| o.id == Some(id))
+    {
+        o.edited_from = Some(depth);
+    }
     result
 }
 
@@ -143,6 +150,7 @@ fn send(app: &mut WordApp, text: String) {
 }
 
 fn open_at_caret(app: &mut WordApp) {
+    close(app);
     let caret = crate::canvas::caret_screen(app).map(|(p, h)| Rect::from_min_size(p, vec2(1.0, h)));
     let anchor = app.ask_agent.selection.or(caret).unwrap_or(Rect::from_min_size(egui::pos2(96.0, 160.0), vec2(1.0, 16.0)));
     app.ask_agent.open = Some(Open { id: None, anchor, turns: vec![], asked: String::new(), target: None, edited_from: None, commented: false });
@@ -227,10 +235,10 @@ fn comment_once(app: &mut WordApp, s: &Snapshot) {
     open.commented = true;
     let target = open.target.clone();
     let (Some(answer), Some(name)) = (&s.answer, &s.agent) else { return };
-    if open.edited_from.is_some() {
+    let from = open.edited_from;
+    let depth = app.session.undo_depth();
+    if from.is_some_and(|f| depth == f + 1) {
         app.session.join_next_undo();
-    } else {
-        open.edited_from = Some(app.session.undo_depth());
     }
     let author = std::mem::replace(&mut app.session.author, format!("Agent ({name})"));
     let sel = app.session.sel.clone();
@@ -238,7 +246,10 @@ fn comment_once(app: &mut WordApp, s: &Snapshot) {
         (app.session.sel.anchor, app.session.sel.focus) = (at.clone(), at);
     }
     let text = format!("You: {}\n\nAgent: {answer}", open.asked);
-    let _ = app.session.run("review.newComment", &json!({"text": text}));
+    let result = app.session.run("review.newComment", &json!({"text": text}));
+    if from.is_none() && result.is_ok() && app.session.undo_depth() > depth {
+        open.edited_from = Some(depth);
+    }
     app.session.sel = sel;
     app.session.author = author;
 }
@@ -266,6 +277,33 @@ const QUICK_ACTIONS: &[ui::QuickAction] = &[
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opening_a_bubble_closes_any_previous_request_in_the_hub() {
+        let (mut app, hub) = app();
+        hub.listen(7, None, Duration::ZERO, || true);
+        command(&mut app, &json!({"instruction": "First"})).unwrap();
+        let first = hub.listen(7, None, Duration::ZERO, || true).unwrap().id;
+        assert!(hub.snapshot(first).is_some());
+        command(&mut app, &json!({})).unwrap();
+        assert!(hub.snapshot(first).is_none(), "opening a new bubble closed the earlier request");
+    }
+
+    #[test]
+    fn failed_command_does_not_record_edited_from_for_undo_join() {
+        let (mut app, hub) = app();
+        hub.listen(7, None, Duration::ZERO, || true);
+        command(&mut app, &json!({"instruction": "Edit"})).unwrap();
+        let id = hub.listen(7, None, Duration::ZERO, || true).unwrap().id;
+        let before = app.session.undo_depth();
+        // A failing command does not set edited_from
+        let _ = as_agent(&mut app, Some(7), "text.insert", &json!({"request": id}), |a| a.run("invalid.command", json!({})));
+        assert_eq!(app.ask_agent.open.as_ref().unwrap().edited_from, None);
+        // Successful command afterwards sets edited_from
+        let p = json!({"text": "done", "request": id});
+        as_agent(&mut app, Some(7), "text.insert", &p, |a| a.run("text.insert", p.clone())).unwrap();
+        assert_eq!(app.ask_agent.open.as_ref().unwrap().edited_from, Some(before));
+    }
     use std::time::Duration;
 
     fn app() -> (WordApp, AgentHub) {

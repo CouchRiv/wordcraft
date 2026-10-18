@@ -80,7 +80,11 @@ impl AgentState {
             // later calls go without it.
             "engine.execute" => {
                 if let (Err(e), Some(id)) = (result, params.get("request").and_then(Value::as_u64))
-                    && (e.contains(&format!("Ask Agent request {id} ")) || e.starts_with("no Ask Agent request"))
+                    && (e.starts_with("NO_REQUEST:")
+                        || e.starts_with("READ_ONLY_REQUEST:")
+                        || e.starts_with("NOT_OWNER:")
+                        || e.contains(&format!("Ask Agent request {id} "))
+                        || e.starts_with("no Ask Agent request"))
                     && !e.contains("asks for an answer only")
                 {
                     self.open.retain(|o| *o != id);
@@ -488,7 +492,7 @@ mod tests {
             let reply = match method {
                 "agent.listen" => json!({"ok": true, "result": {"id": 5, "instruction": "shorten"}}),
                 "engine.execute" if req["params"]["request"] == 6 => {
-                    json!({"ok": false, "error": "Ask Agent request 6 was cancelled by the person: `text.insert` was not run"})
+                    json!({"ok": false, "errorCode": "NO_REQUEST", "error": "no Ask Agent request 6"})
                 }
                 "agent.reply" => json!({"ok": true, "result": {"id": req["params"]["id"], "shown": true}}),
                 _ => json!({"ok": true, "result": {}}),
@@ -513,7 +517,7 @@ mod tests {
         assert!(seen.recv_timeout(WAIT).unwrap()["params"].get("request").is_none(), "closed: plain edits again");
         // The person cancelled: the app refuses, and the bridge lets the request go.
         r.agent_state().lock().unwrap().open.push(6);
-        assert!(r.call("engine.execute", json!({"command": "text.insert", "params": {"text": "d"}})).unwrap_err().contains("cancelled"));
+        assert!(r.call("engine.execute", json!({"command": "text.insert", "params": {"text": "d"}})).unwrap_err().contains("NO_REQUEST"));
         let _ = seen.recv_timeout(WAIT);
         assert!(r.agent_state().lock().unwrap().open().is_empty());
         // Another connection of the same bridge (`--channel`) shares the state.

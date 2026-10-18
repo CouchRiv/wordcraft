@@ -128,6 +128,13 @@ fn ask_agent_tools_are_listed_and_need_the_app() {
     let tools = call(&mut s, 1, "tools/list", json!({}));
     let names: Vec<&str> = tools["result"]["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(names.contains(&"wait_for_request") && names.contains(&"reply_to_request"), "{names:?}");
+    let tools_list = tools["result"]["tools"].as_array().unwrap();
+    let wait = tools_list.iter().find(|t| t["name"] == "wait_for_request").unwrap();
+    assert_eq!(wait["annotations"]["readOnlyHint"], false);
+    assert_eq!(wait["annotations"]["destructiveHint"], true);
+    let list_cmd = tools_list.iter().find(|t| t["name"] == "list_commands").unwrap();
+    assert_eq!(list_cmd["annotations"]["readOnlyHint"], true);
+    assert_eq!(list_cmd["annotations"]["destructiveHint"], false);
     for (name, args) in [("wait_for_request", json!({})), ("reply_to_request", json!({"id": 1, "text": "Done."}))] {
         let r = call(&mut s, 2, "tools/call", json!({"name": name, "arguments": args}));
         assert_eq!(r["result"]["isError"], true, "{name}: {r}");

@@ -56,7 +56,7 @@ fn obj(props: Value, req: &[&str]) -> Value {
     json!({"type": "object", "properties": props, "required": req})
 }
 fn tool(name: &str, title: &str, desc: &str, schema: Value, ro: bool) -> Value {
-    json!({"name": name, "title": title, "description": desc, "inputSchema": schema, "annotations": {"title": title, "readOnlyHint": ro, "destructiveHint": false, "openWorldHint": false}})
+    json!({"name": name, "title": title, "description": desc, "inputSchema": schema, "annotations": {"title": title, "readOnlyHint": ro, "destructiveHint": !ro, "openWorldHint": false}})
 }
 
 pub fn tool_definitions() -> Value {
@@ -163,7 +163,7 @@ pub fn tool_definitions() -> Value {
             "Wait for an Ask Agent request",
             WAIT_DESCRIPTION,
             json!({"type":"object","properties":{"timeout_s":{"type":"number","minimum":0,"default":30,"description":"Seconds to wait; capped at 60."},"agent":{"type":"string","description":"Optional display name; otherwise initialized MCP client name."}},"required":[],"additionalProperties":false}),
-            true
+            false
         ),
         tool(
             "reply_to_request",
