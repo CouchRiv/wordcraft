@@ -1,0 +1,66 @@
+{
+  "capture": "Real egui application UI, real document commands, deterministic locally scripted agent replies; no live LLM call.",
+  "fixture": "Fictional route pilot / region table only.",
+  "editing": "Fixed crop + resize + captions, no content tweening.",
+  "review_branches": "Keep and Undo alternatives explicitly captioned.",
+  "coverage": {
+    "all_apps": [
+      "quick action menu shown; selecting preset does not send; instruction remains editable",
+      "Conversation expands with prior instruction/answer and current instruction; true scrolling where needed",
+      "signed comments preserve both instructions and answers",
+      "selection",
+      "Ask Agent bubble",
+      "real agent dropdown with Claude Code and Codex",
+      "instruction",
+      "working",
+      "document mutation",
+      "response",
+      "Keep plus signed comments retained after close",
+      "follow-up in same thread",
+      "Undo clicked, original restored"
+    ],
+    "wordcraft": [
+      "tracked edits"
+    ],
+    "gridcraft": [
+      "total SUM row"
+    ],
+    "deckcraft": [
+      "real bullets",
+      "nested signed comment reply"
+    ],
+    "pdfcraft": [
+      "real highlights",
+      "HELD error verified by protocol only, no visible badge claimed"
+    ]
+  },
+  "outputs": [
+    {
+      "app": "wordcraft",
+      "gif": "wordcraft.gif",
+      "gif_bytes": 1186907,
+      "gif_duration_ms": 62160,
+      "gif_sha256": "73ab407a3a117a858c4159fd2b409f230d66eb18c19c52d091948bde44a49375",
+      "mp4": "wordcraft.mp4",
+      "mp4_sha256": "9b6344fe77f3d44ef29b86485df46831decc217004d0d2b92454b24565c7d2b2",
+      "probe": {
+        "programs": [],
+        "stream_groups": [],
+        "streams": [
+          {
+            "codec_name": "h264",
+            "width": 1280,
+            "height": 900,
+            "r_frame_rate": "30/1"
+          }
+        ],
+        "format": {
+          "duration": "62.166667"
+        }
+      }
+    }
+  ],
+  "source_code_commits": {
+    "wordcraft": "99288c48"
+  }
+}
