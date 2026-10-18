@@ -259,11 +259,18 @@ pub fn agent_label(ui: &mut egui::Ui, name: &str) {
 /// A drawn four-point sparkle in the selection colour, so it shows whatever the interface font.
 fn sparkle(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(vec2(12.0, 12.0), egui::Sense::hover());
-    let (c, colour) = (rect.center(), ui.visuals().selection.stroke.color);
+    let (c, colour) = (rect.center(), accent(ui.visuals()));
     for (long, short) in [(vec2(0.0, 6.0), vec2(1.6, 0.0)), (vec2(6.0, 0.0), vec2(0.0, 1.6))] {
         let points = vec![c - long, c + short, c + long, c - short];
         ui.painter().add(egui::Shape::convex_polygon(points, colour, Stroke::NONE));
     }
+}
+
+/// Of the selection's fill and text colours, the one that stands out more on the bubble.
+fn accent(v: &egui::Visuals) -> Color32 {
+    let luma = |c: Color32| 0.299 * f32::from(c.r()) + 0.587 * f32::from(c.g()) + 0.114 * f32::from(c.b());
+    let (fill, text, bg) = (v.selection.bg_fill, v.selection.stroke.color, luma(v.window_fill));
+    if (luma(fill) - bg).abs() > (luma(text) - bg).abs() { fill } else { text }
 }
 
 /// A drawn ✕, so it shows whatever the interface font.
