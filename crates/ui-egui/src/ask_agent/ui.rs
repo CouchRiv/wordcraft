@@ -1,5 +1,9 @@
-//! Ask Agent's chip and bubble. Shared as is by the four apps: egui's own visuals (each app sets
-//! them from its theme) and one translation function, the only line that differs between apps.
+//! The chip and the bubble, in egui's own visuals (each app sets them from its theme).
+//!
+//! Layout: the chip sits just under the selection, where the bubble then opens. The bubble has three
+//! bands on one left edge: a header (who gets the request, close), the content (conversation, status,
+//! answer), and a footer row (Actions on the left, the primary button on the right). Every control in
+//! the bubble has the same height.
 
 use egui::{Align, Color32, Key, Layout, Rect, RichText, Stroke, pos2, vec2};
 
@@ -36,21 +40,25 @@ pub struct View<'a> {
     pub instruction: &'a str,
 }
 
-const WIDTH: f32 = 340.0;
+const WIDTH: f32 = 360.0;
+/// One height for every control in the bubble, so the rows line up.
+const ROW: f32 = 28.0;
 
-/// The chip in the margin beside the selection's first line; true when clicked.
+/// The chip just under the selection, on its left edge, where the bubble opens; true when clicked.
 pub fn chip(ctx: &egui::Context, anchor: Rect) -> bool {
-    let (pos, pivot) = match anchor.left() > 140.0 {
-        true => (pos2(anchor.left() - 10.0, anchor.top()), egui::Align2::RIGHT_TOP),
-        false => (pos2(anchor.left(), anchor.bottom() + 6.0), egui::Align2::LEFT_TOP),
-    };
     egui::Area::new("ask_agent_chip".into())
         .order(egui::Order::Foreground)
-        .fixed_pos(pos)
-        .pivot(pivot)
+        .fixed_pos(origin(ctx, anchor, 140.0))
+        .constrain(true)
         .show(ctx, |ui| {
-            let frame = egui::Frame::popup(ui.style()).corner_radius(14.0).inner_margin(egui::Margin::symmetric(12, 5));
-            let inner = frame.show(ui, |ui| ui.label(RichText::new(tr(ctx, "Ask Agent")).strong()));
+            let frame = egui::Frame::popup(ui.style()).corner_radius(14.0).inner_margin(egui::Margin::symmetric(10, 5));
+            let inner = frame.show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    sparkle(ui);
+                    ui.label(RichText::new(tr(ctx, "Ask Agent")).strong());
+                })
+            });
             let response = ui.interact(inner.response.rect, ui.id().with("chip"), egui::Sense::click());
             response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
         })
@@ -60,97 +68,136 @@ pub fn chip(ctx: &egui::Context, anchor: Rect) -> bool {
 /// The bubble under `anchor`: instruction, the agent at work, its answer with Keep, Undo and a
 /// follow-up field.
 pub fn bubble(ctx: &egui::Context, anchor: Rect, view: &View, draft: &mut String, picked: &mut Option<String>) -> Option<Action> {
-    let screen = ctx.content_rect();
-    let pos = pos2(anchor.left().clamp(8.0, (screen.right() - WIDTH - 40.0).max(8.0)), anchor.bottom() + 8.0);
     let mut action = None;
-    egui::Area::new("ask_agent_bubble".into()).order(egui::Order::Foreground).fixed_pos(pos).constrain(true).show(ctx, |ui| {
-        egui::Frame::popup(ui.style()).corner_radius(10.0).inner_margin(16.0).show(ui, |ui| {
-            ui.set_width(WIDTH);
-            ui.spacing_mut().item_spacing.y = 8.0;
-            ui.horizontal(|ui| {
-                match view.snapshot.and_then(|s| s.agent.as_deref()) {
-                    Some(name) => agent_label(ui, name),
-                    None => _ = ui.label(RichText::new(tr(ctx, "Ask Agent")).strong()),
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if close_button(ui).on_hover_text(tr(ctx, "Close")).clicked() {
-                        action = Some(Action::Close);
+    egui::Area::new("ask_agent_bubble".into()).order(egui::Order::Foreground).fixed_pos(origin(ctx, anchor, WIDTH + 40.0)).constrain(true).show(
+        ctx,
+        |ui| {
+            egui::Frame::popup(ui.style()).corner_radius(12.0).inner_margin(egui::Margin::symmetric(16, 14)).show(ui, |ui| {
+                ui.set_width(WIDTH);
+                let spacing = ui.spacing_mut();
+                spacing.item_spacing = vec2(8.0, 10.0);
+                spacing.interact_size.y = ROW;
+                spacing.button_padding = vec2(12.0, 4.0);
+                let status = view.snapshot.map(|s| s.status);
+
+                // Header: who the request is for, then close; the agent choice sits on the right.
+                row(ui, Layout::left_to_right(Align::Center), |ui| {
+                    match view.snapshot.and_then(|s| s.agent.as_deref()) {
+                        Some(name) => agent_label(ui, name),
+                        None => {
+                            sparkle(ui);
+                            ui.label(RichText::new(tr(ctx, "Ask Agent")).strong());
+                        }
                     }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if close_button(ui).on_hover_text(tr(ctx, "Close")).clicked() {
+                            action = Some(Action::Close);
+                        }
+                        if status.is_none() {
+                            picker(ui, view.agents, picked);
+                        }
+                    });
                 });
-            });
-            let status = view.snapshot.map(|s| s.status);
-            if !view.instruction.is_empty() || !view.history.is_empty() {
-                egui::CollapsingHeader::new(tr(ctx, "Conversation"))
-                    .id_salt(("ask_conversation", view.history.len()))
-                    .default_open(!view.history.is_empty())
-                    .show(ui, |ui| {
-                        egui::ScrollArea::vertical().id_salt("ask_conversation_scroll").max_height(160.0).show(ui, |ui| {
-                            for turn in view.history {
-                                ui.label(RichText::new(tr(ctx, "You")).strong());
-                                ui.label(&turn.instruction);
-                                ui.label(RichText::new(tr(ctx, "Agent")).strong());
-                                ui.label(&turn.answer);
-                                ui.separator();
+
+                if !view.instruction.is_empty() || !view.history.is_empty() {
+                    egui::CollapsingHeader::new(tr(ctx, "Conversation"))
+                        .id_salt(("ask_conversation", view.history.len()))
+                        .default_open(!view.history.is_empty())
+                        .show(ui, |ui| {
+                            egui::ScrollArea::vertical().id_salt("ask_conversation_scroll").max_height(160.0).show(ui, |ui| {
+                                for turn in view.history {
+                                    ui.label(RichText::new(tr(ctx, "You")).strong());
+                                    ui.label(&turn.instruction);
+                                    ui.label(RichText::new(tr(ctx, "Agent")).strong());
+                                    ui.label(&turn.answer);
+                                    ui.separator();
+                                }
+                                if !view.instruction.is_empty() {
+                                    ui.label(RichText::new(tr(ctx, "Current instruction")).strong());
+                                    ui.label(view.instruction);
+                                }
+                            });
+                        });
+                }
+
+                if let Some(s) = view.snapshot {
+                    for note in &s.notes {
+                        ui.label(RichText::new(note).weak());
+                    }
+                }
+                match status {
+                    Some(Status::Queued) => _ = ui.label(RichText::new(tr(ctx, "Waiting for an agent…")).weak()),
+                    Some(Status::Working { .. }) => {
+                        row(ui, Layout::left_to_right(Align::Center), |ui| {
+                            ui.spinner();
+                            ui.label(RichText::new(tr(ctx, "Working on it…")).weak());
+                        });
+                    }
+                    Some(Status::Failed) => {
+                        let error = view.snapshot.and_then(|s| s.error.as_deref()).unwrap_or_default();
+                        ui.label(RichText::new(error).color(ui.visuals().error_fg_color));
+                    }
+                    Some(Status::Answered) => {
+                        ui.label(view.snapshot.and_then(|s| s.answer.as_deref()).unwrap_or_default());
+                        // The decision on the right, primary last, like Send below.
+                        row(ui, Layout::right_to_left(Align::Center), |ui| {
+                            if ui.add(primary(ui, tr(ctx, "Keep"))).clicked() {
+                                action = Some(Action::Keep);
                             }
-                            if !view.instruction.is_empty() {
-                                ui.label(RichText::new(tr(ctx, "Current instruction")).strong());
-                                ui.label(view.instruction);
+                            if ui.button(tr(ctx, "Undo")).on_hover_text(tr(ctx, "Undo all of the agent's edits")).clicked() {
+                                action = Some(Action::Undo);
+                            }
+                        });
+                        ui.separator();
+                    }
+                    None => {}
+                }
+                if matches!(status, None | Some(Status::Answered | Status::Failed)) {
+                    let hint = if status.is_none() { tr(ctx, "What should the agent do?") } else { tr(ctx, "Reply to refine…") };
+                    let field = ui.add(
+                        egui::TextEdit::multiline(draft)
+                            .hint_text(hint)
+                            .desired_rows(3)
+                            .desired_width(f32::INFINITY)
+                            .margin(egui::Margin::symmetric(8, 6)),
+                    );
+                    if status.is_none() && !field.has_focus() && draft.is_empty() {
+                        field.request_focus();
+                    }
+                    let enter = field.has_focus() && ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift);
+                    // Footer: starting points on the left, Send on the right.
+                    row(ui, Layout::left_to_right(Align::Center), |ui| {
+                        if matches!(status, None | Some(Status::Answered)) && !view.actions.is_empty() {
+                            quick_actions(ui, view.actions, draft);
+                        }
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let ready = !draft.trim().is_empty();
+                            if (ui.add_enabled(ready, primary(ui, tr(ctx, "Send"))).clicked() || enter) && ready {
+                                action = Some(Action::Send(std::mem::take(draft).trim().to_string()));
                             }
                         });
                     });
-            }
-
-            if let Some(s) = view.snapshot {
-                for note in &s.notes {
-                    ui.label(RichText::new(note).weak());
                 }
-            }
-            match status {
-                Some(Status::Queued) => _ = ui.label(RichText::new(tr(ctx, "Waiting for an agent…")).weak()),
-                Some(Status::Working { .. }) => {
-                    _ = ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(RichText::new(tr(ctx, "Working on it…")).weak());
-                    })
-                }
-                Some(Status::Failed) => {
-                    let error = view.snapshot.and_then(|s| s.error.as_deref()).unwrap_or_default();
-                    ui.label(RichText::new(error).color(ui.visuals().error_fg_color));
-                }
-                Some(Status::Answered) => {
-                    ui.label(view.snapshot.and_then(|s| s.answer.as_deref()).unwrap_or_default());
-                    ui.horizontal(|ui| {
-                        if ui.add(egui::Button::new(RichText::new(tr(ctx, "Keep")).strong()).fill(ui.visuals().selection.bg_fill)).clicked() {
-                            action = Some(Action::Keep);
-                        }
-                        if ui.button(tr(ctx, "Undo")).on_hover_text(tr(ctx, "Undo all of the agent's edits")).clicked() {
-                            action = Some(Action::Undo);
-                        }
-                    });
-                    ui.separator();
-                }
-                None => picker(ui, view.agents, picked),
-            }
-            if matches!(status, None | Some(Status::Answered | Status::Failed)) {
-                if matches!(status, None | Some(Status::Answered)) && !view.actions.is_empty() {
-                    quick_actions(ui, view.actions, draft);
-                }
-                let hint = if status.is_none() { tr(ctx, "What should the agent do?") } else { tr(ctx, "Reply to refine…") };
-                let field = ui.add(egui::TextEdit::multiline(draft).hint_text(hint).desired_rows(2).desired_width(f32::INFINITY));
-                if status.is_none() && !field.has_focus() && draft.is_empty() {
-                    field.request_focus();
-                }
-                let enter = field.has_focus() && ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let ready = !draft.trim().is_empty();
-                    if (ui.add_enabled(ready, egui::Button::new(tr(ctx, "Send"))).clicked() || enter) && ready {
-                        action = Some(Action::Send(std::mem::take(draft).trim().to_string()));
-                    }
-                });
-            }
-        });
-    });
+            });
+        },
+    );
     action
+}
+
+/// Where the chip and the bubble open: under the selection, on its left edge, kept on screen.
+fn origin(ctx: &egui::Context, anchor: Rect, width: f32) -> egui::Pos2 {
+    let screen = ctx.content_rect();
+    pos2(anchor.left().clamp(8.0, (screen.right() - width).max(8.0)), anchor.bottom() + 8.0)
+}
+
+/// One row of controls, exactly `ROW` high, whatever the layout direction.
+fn row(ui: &mut egui::Ui, layout: Layout, add: impl FnOnce(&mut egui::Ui)) {
+    ui.allocate_ui_with_layout(vec2(ui.available_width(), ROW), layout, add);
+}
+
+/// The one filled button of a row.
+fn primary(ui: &egui::Ui, text: &str) -> egui::Button<'static> {
+    egui::Button::new(RichText::new(text).strong()).fill(ui.visuals().selection.bg_fill).min_size(vec2(72.0, ROW))
 }
 
 /// Native menus keep less common actions out of the writing surface.
@@ -178,20 +225,19 @@ fn quick_actions(ui: &mut egui::Ui, actions: &[QuickAction], draft: &mut String)
     .on_hover_text(tr(ui.ctx(), "Choose a starting instruction, then edit and send"));
 }
 
-/// Who the request goes to, when more than one agent listens.
+/// Who the request goes to, when more than one agent listens. Called in a right-to-left row, so
+/// the box comes first and its label lands on its left.
 fn picker(ui: &mut egui::Ui, agents: &[String], picked: &mut Option<String>) {
     if agents.len() < 2 {
         return;
     }
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(tr(ui.ctx(), "Agent")).weak());
-        egui::ComboBox::from_id_salt("ask_agent_picker").selected_text(picked.as_deref().unwrap_or(tr(ui.ctx(), "Any"))).show_ui(ui, |ui| {
-            ui.selectable_value(picked, None, tr(ui.ctx(), "Any"));
-            for name in agents {
-                ui.selectable_value(picked, Some(name.clone()), name);
-            }
-        });
+    egui::ComboBox::from_id_salt("ask_agent_picker").selected_text(picked.as_deref().unwrap_or(tr(ui.ctx(), "Any"))).show_ui(ui, |ui| {
+        ui.selectable_value(picked, None, tr(ui.ctx(), "Any"));
+        for name in agents {
+            ui.selectable_value(picked, Some(name.clone()), name);
+        }
     });
+    ui.label(RichText::new(tr(ui.ctx(), "Agent")).weak());
 }
 
 /// The agent's colour dot and name.
@@ -200,6 +246,16 @@ pub fn agent_label(ui: &mut egui::Ui, name: &str) {
     let (dot, _) = ui.allocate_exact_size(vec2(10.0, 10.0), egui::Sense::hover());
     ui.painter().circle(dot.center(), 5.0, Color32::from_rgb(r, g, b), Stroke::NONE);
     ui.label(RichText::new(name).strong());
+}
+
+/// A drawn four-point sparkle in the selection colour, so it shows whatever the interface font.
+fn sparkle(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(vec2(12.0, 12.0), egui::Sense::hover());
+    let (c, colour) = (rect.center(), ui.visuals().selection.stroke.color);
+    for (long, short) in [(vec2(0.0, 6.0), vec2(1.6, 0.0)), (vec2(6.0, 0.0), vec2(0.0, 1.6))] {
+        let points = vec![c - long, c + short, c + long, c - short];
+        ui.painter().add(egui::Shape::convex_polygon(points, colour, Stroke::NONE));
+    }
 }
 
 /// A drawn ✕, so it shows whatever the interface font.
