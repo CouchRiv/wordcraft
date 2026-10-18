@@ -88,6 +88,42 @@ pub fn field_name(instr: &str) -> String {
     instr.split_whitespace().next().unwrap_or("").trim_start_matches('=').to_ascii_uppercase()
 }
 
+/// REF's hyperlink switch links its cached result without updating that result.
+pub(crate) fn reference_link(instr: &str) -> Option<String> {
+    let (name, args) = instr.trim_start().split_once(char::is_whitespace)?;
+    if !name.eq_ignore_ascii_case("REF") {
+        return None;
+    }
+    let args = args.trim_start();
+    let (target, switches) = if let Some(quoted) = args.strip_prefix('"') {
+        let end = quoted.find('"')?;
+        (quoted.get(..end)?, quoted.get(end + 1..)?)
+    } else {
+        let end = args.find(|c: char| c.is_whitespace() || c == '\\').unwrap_or(args.len());
+        (args.get(..end)?, args.get(end..)?)
+    };
+    if target.is_empty() {
+        return None;
+    }
+    // Switch arguments can contain quoted backslashes; those are not switches.
+    let mut chars = switches.chars().peekable();
+    let mut quoted = false;
+    while let Some(c) = chars.next() {
+        if quoted && c == '\\' {
+            chars.next();
+        } else if c == '"' {
+            quoted = !quoted;
+        } else if !quoted
+            && c == '\\'
+            && chars.next().is_some_and(|s| s.eq_ignore_ascii_case(&'h'))
+            && chars.peek().is_none_or(|c| !c.is_alphanumeric())
+        {
+            return Some(format!("#{target}"));
+        }
+    }
+    None
+}
+
 /// `\* FORMAT` switch value (Arabic, roman, ROMAN, alphabetic, ALPHABETIC, CardText, Ordinal…).
 pub fn format_switch(instr: &str) -> Option<NumFormat> {
     let mut it = instr.split_whitespace();
@@ -143,6 +179,8 @@ pub fn field_text_on(instr: &str, result: &str, ctx: &FieldCtx, page: u32) -> (S
         "TITLE" if result.is_empty() => (ctx.title.to_string(), false),
         "AUTHOR" if result.is_empty() => (ctx.author.to_string(), false),
         "FILENAME" if result.is_empty() => (ctx.filename.to_string(), false),
+        // ASK and SET only assign text to a bookmark: they never show a result (ECMA-376 §17.16.5).
+        "ASK" | "SET" => (String::new(), false),
         "STYLEREF" => match &ctx.styleref {
             Some((ix, at)) => (ix.eval(instr, *at), true),
             None => (result.to_string(), false),
@@ -176,6 +214,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ref_link_switches() {
+        for instr in [r"REF mark\w\h", r#" REF "mark" \h"#, "REF\tmark \\H"] {
+            assert_eq!(reference_link(instr).as_deref(), Some("#mark"), "{instr}");
+        }
+        for instr in ["", "REF", r"REF \h", r#"REF "" \h"#, r#"REF "mark \h"#, r"REF mark \hidden", r"NOTEREF mark \h", r#"REF mark \d "\h""#] {
+            assert_eq!(reference_link(instr), None, "{instr}");
+        }
+    }
+
+    #[test]
     fn page_fields() {
         let ctx = FieldCtx { page: 4, pages: 12, ..Default::default() };
         assert_eq!(field_text("PAGE", "", &ctx), ("4".into(), true));
@@ -187,6 +235,17 @@ mod tests {
         assert_eq!(field_name("=SUM(ABOVE)"), "SUM(ABOVE)");
         assert_eq!(field_code_text(" PAGE \\* ROMAN "), "{ PAGE \\* ROMAN }");
         assert_eq!(field_code_text(""), "{  }");
+    }
+
+    /// #1765: ASK and SET only assign text to a bookmark; they show nothing, whatever result is stored.
+    #[test]
+    fn ask_and_set_show_nothing() {
+        let ctx = FieldCtx::default();
+        assert_eq!(field_text(r#" ASK Nominativo "Inserire nome" \d "«NOME»" "#, "«NOME» «COGNOME»", &ctx), (String::new(), false));
+        assert_eq!(field_text(r#"SET Codice "COD""#, "COD", &ctx), (String::new(), false));
+        assert_eq!(field_text("set Codice COD", "COD", &ctx).0, "");
+        // Other fields still show their stored result.
+        assert_eq!(field_text("MERGEFIELD NOME", "«NOME»", &ctx).0, "«NOME»");
     }
 
     #[test]

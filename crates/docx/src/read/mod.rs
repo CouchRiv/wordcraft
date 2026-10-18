@@ -5,6 +5,7 @@ pub(crate) mod diagram;
 mod drawing_color;
 mod embed;
 mod freeform;
+mod glossary;
 pub(crate) mod math;
 mod props;
 mod sdt;
@@ -281,11 +282,12 @@ pub(crate) fn read_opened(pkg: &Package) -> Result<Document, DocxError> {
     // bytes, never parsed or run, so a .docm/.dotm saved again carries exactly what the file had.
     // Only the relationships and content types are read.
     if let Some(v) = part(rt::VBA_PROJECT)
-        && let Some(b) = pkg.get(&v).filter(|b| !b.is_empty())
+        && let Some(b) = pkg.get_shared(&v).filter(|b| !b.is_empty())
     {
-        r.doc.passthrough.insert(VBA_PROJECT_PART.into(), Arc::new(b.to_vec()));
+        r.doc.passthrough.insert(VBA_PROJECT_PART.into(), b.clone());
         r.read_vba_related(&v);
     }
+    r.read_glossary(&rels);
     r.keep_custom_xml(&root_rels, &rels);
     r.keep_unmodelled(&root_rels, &rels);
     if !r.embedded.parts.is_empty() {
@@ -577,7 +579,7 @@ impl Reader<'_> {
                 log::warn!("docx: not carrying VBA-related part {path:?}");
                 continue;
             }
-            let Some(bytes) = self.pkg.get(path) else {
+            let Some(bytes) = self.pkg.get_shared(path) else {
                 log::warn!("docx: VBA-related part {path} is missing; keeping the project without it");
                 continue;
             };
@@ -587,7 +589,7 @@ impl Reader<'_> {
             }
             kept += 1;
             manifest.push_str(&format!("{}\t{path}\t{ct}\n", rel.kind));
-            self.doc.passthrough.entry(path.to_string()).or_insert_with(|| Arc::new(bytes.to_vec()));
+            self.doc.passthrough.entry(path.to_string()).or_insert_with(|| bytes.clone());
         }
         if !manifest.is_empty() {
             self.doc.passthrough.insert(VBA_RELATED.into(), Arc::new(manifest.into_bytes()));
@@ -642,7 +644,7 @@ impl Reader<'_> {
         if let Some(k) = self.media_by_path.get(&rel.target) {
             return Some(k.clone());
         }
-        let bytes = self.pkg.get(&rel.target)?;
+        let bytes = self.pkg.get_shared(&rel.target)?;
         let base: String =
             rel.target.rsplit('/').next().unwrap_or("image").chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')).collect();
         let base = if base.is_empty() || base.starts_with('.') { format!("image{base}") } else { base };
@@ -655,7 +657,7 @@ impl Reader<'_> {
                 None => format!("{base}_{n}"),
             };
         }
-        self.doc.media.insert(key.clone(), Arc::new(bytes.to_vec()));
+        self.doc.media.insert(key.clone(), bytes.clone());
         self.media_by_path.insert(rel.target.clone(), key.clone());
         Some(key)
     }
@@ -816,9 +818,6 @@ impl Reader<'_> {
         for s in root.children("w:style").take(10_000) {
             let Some(raw_id) = s.attr("w:styleId").filter(|i| !i.is_empty()) else { continue };
             let id = self.pc.style_id(raw_id);
-            if sheet.get(&id).is_some() {
-                continue;
-            }
             let kind = match s.attr("w:type").unwrap_or("paragraph") {
                 "character" => StyleKind::Character,
                 "table" => StyleKind::Table,
@@ -860,7 +859,13 @@ impl Reader<'_> {
                 let parts = self.table_style_parts(s, &mut st);
                 st.table = (parts != TableStyleParts::default()).then_some(parts);
             }
-            sheet.styles.push(st);
+            // A style defined twice (some generators write their own Heading 1 after a
+            // placeholder one) is the last definition, whole: Word drops the earlier one rather
+            // than merging the two (observed with synthetic documents).
+            match sheet.styles.iter_mut().find(|s| s.id == id) {
+                Some(earlier) => *earlier = st,
+                None => sheet.styles.push(st),
+            }
         }
         // Styles that give only a list level take the list from the style they are based on
         // (Heading 3: level 3 of Heading 2's outline list).
@@ -1083,6 +1088,7 @@ impl Reader<'_> {
                     s.sum_paragraph_spacing = k.children("w:doNotUseHTMLParagraphAutoSpacing").any(on_off);
                 }
                 "w:trackRevisions" => s.track_changes = on_off(k),
+                "w:doNotTrackMoves" => s.track_moves = !on_off(k),
                 "w:defaultTabStop" => {
                     if let Some(v) = tw(k, "w:val").filter(|v| *v > 0.0) {
                         s.default_tab = v.clamp(1.0, 1584.0);

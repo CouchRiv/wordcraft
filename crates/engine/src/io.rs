@@ -172,7 +172,10 @@ pub fn open_bytes_in(name: &str, bytes: &[u8], password: Option<&str>, region: &
 /// installed then lays out and exports with it instead of a fallback. Faces already available
 /// stay as they are.
 fn load_embedded_fonts(doc: &Document) {
-    let files: Vec<Vec<u8>> = wordcraft_docx::embedded_fonts(doc).iter().filter_map(|f| wordcraft_fonts::decode_font_file(f).ok()).collect();
+    let files: Vec<(Vec<u8>, String)> = wordcraft_docx::embedded_fonts(doc)
+        .into_iter()
+        .filter_map(|f| wordcraft_fonts::decode_font_file(&f.data).ok().map(|data| (data, f.name)))
+        .collect();
     if !files.is_empty() {
         wordcraft_fonts::FontDb::global().add_document_fonts(files);
     }
@@ -191,7 +194,7 @@ fn read_bytes(name: &str, bytes: &[u8], password: Option<&str>, page: &wordcraft
     let mut doc = match ext.as_str() {
         "doc" | "dot" => {
             let (mut doc, encrypted) = open_binary_doc(bytes, password)?;
-            doc.ensure_nonempty();
+            opened(&mut doc);
             return Ok((doc, encrypted));
         }
         // Plain text goes through the formats importer: BOMs, unmarked UTF-16, Windows-1252.
